@@ -34,6 +34,17 @@ namespace MecchaCamouflage::Diagnostics
             file << "body_hits=" << snapshot.body_hits << "\n";
             file << "uv_hits=" << snapshot.uv_hits << "\n";
             file << "paint_backend=" << snapshot.paint_backend << "\n";
+            file << "side_enabled=" << snapshot.side_enabled << "\n";
+            file << "side_backend=" << snapshot.side_backend << "\n";
+            file << "side_query_attempts=" << snapshot.side_query_attempts << "\n";
+            file << "side_query_success=" << snapshot.side_query_success << "\n";
+            file << "side_query_uv_hits=" << snapshot.side_query_uv_hits << "\n";
+            file << "side_projected_pixels=" << snapshot.side_projected_pixels << "\n";
+            file << "side_material_hits=" << snapshot.side_material_hits << "\n";
+            file << "side_seeds=" << snapshot.side_seeds << "\n";
+            file << "side_nearest_sources=" << snapshot.side_nearest_sources << "\n";
+            file << "side_duplicate_texels=" << snapshot.side_duplicate_texels << "\n";
+            file << "side_normal_suspect=" << snapshot.side_normal_suspect << "\n";
             file << "last_failure=" << snapshot.last_failure << "\n";
             file << "world=" << snapshot.world << "\n";
             file << "pawn=" << snapshot.pawn << "\n";

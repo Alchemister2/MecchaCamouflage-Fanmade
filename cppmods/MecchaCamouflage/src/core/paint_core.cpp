@@ -207,8 +207,9 @@ namespace MecchaCamouflage::Core
         std::vector<ProjectionTexel> texels(texture_pixels);
         for (const auto& seed : seeds)
         {
-            const auto priority = seed.floor_like ? 12 : 11;
-            const auto weight = seed.floor_like ? 88.0 : 72.0;
+            const auto priority = seed.priority > 0 ? seed.priority : (seed.floor_like ? 12 : 11);
+            const auto weight = seed.weight > 0.0 ? seed.weight : (seed.floor_like ? 88.0 : 72.0);
+            const auto radius = std::max(0, seed.radius);
             splat_projection_texel(texels,
                                    albedo_before.width,
                                    albedo_before.height,
@@ -218,7 +219,7 @@ namespace MecchaCamouflage::Core
                                    weight,
                                    priority,
                                    seed.floor_like,
-                                   2);
+                                   radius);
         }
 
         std::vector<std::uint8_t> direct_mask(texture_pixels, 0);

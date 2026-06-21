@@ -106,6 +106,22 @@ namespace
         StringType failure{};
     };
 
+    struct BrushQueryHit
+    {
+        bool params_ok{false};
+        bool success{false};
+        bool has_uv{false};
+        double u{0.0};
+        double v{0.0};
+        Unreal::FVector world_position{};
+        Unreal::FVector normal{};
+        Unreal::UObject* component{nullptr};
+        Unreal::UObject* actor{nullptr};
+        int face_index{-1};
+        double distance{0.0};
+        StringType failure{};
+    };
+
     struct ScreenHitSample
     {
         double screen_x{0.0};
@@ -120,6 +136,16 @@ namespace
         Unreal::FVector normal{};
         Color color{};
         bool floor_like{false};
+    };
+
+    struct ResolvedSurfaceSeed
+    {
+        double u{0.0};
+        double v{0.0};
+        Color color{};
+        bool floor_like{false};
+        Unreal::FVector world_position{};
+        Unreal::FVector normal{};
     };
 
     struct ScreenTransform
@@ -339,6 +365,25 @@ namespace
         int exhausted{0};
     };
 
+    struct BrushQuerySideStats
+    {
+        int attempts{0};
+        int success{0};
+        int uv_hits{0};
+        int owner_hits{0};
+        int projected_pixels{0};
+        int material_hits{0};
+        int seeds{0};
+        int frame_projected_pixels{0};
+        int nearest_sources{0};
+        int duplicate_texels{0};
+        int normal_suspect{0};
+        int out_of_view{0};
+        int no_color{0};
+        StringType first_failure{};
+        StringType query_name{};
+    };
+
     struct ProbeState
     {
         bool unreal_initialized{false};
@@ -377,6 +422,16 @@ namespace
         int background_trace_hits{0};
         int paint_world_success{0};
         int paint_uv_success{0};
+        int side_enabled{0};
+        int side_query_attempts{0};
+        int side_query_success{0};
+        int side_query_uv_hits{0};
+        int side_projected_pixels{0};
+        int side_material_hits{0};
+        int side_seeds{0};
+        int side_nearest_sources{0};
+        int side_duplicate_texels{0};
+        int side_normal_suspect{0};
         uint64_t paint_state_hash_before{0};
         uint64_t paint_state_hash_after{0};
         uint64_t play_id{0};
@@ -387,6 +442,7 @@ namespace
         StringType current_world{};
         StringType current_pawn{};
         StringType current_component{};
+        StringType side_backend{STR("disabled")};
         StringType last_failure{STR("not_run")};
     };
 
@@ -1514,6 +1570,13 @@ namespace
         return property ? read_vector2(property, base) : std::nullopt;
     }
 
+    auto read_number_from_struct(const Unreal::UStruct* structure, uint8_t* base, const CharType* name)
+        -> std::optional<double>
+    {
+        auto* property = find_struct_property(structure, name);
+        return property ? read_number(property, base) : std::nullopt;
+    }
+
     auto decode_screen_space_paint_result(Unreal::UFunction* function, uint8_t* params) -> ScreenSpaceHitResult
     {
         ScreenSpaceHitResult out{};
@@ -1557,6 +1620,67 @@ namespace
         if (auto normal = read_vector_from_struct(structure, base, STR("HitNormal")))
         {
             out.normal = *normal;
+        }
+        return out;
+    }
+
+    auto decode_brush_query_result(Unreal::UFunction* function, uint8_t* params) -> BrushQueryHit
+    {
+        BrushQueryHit out{};
+        auto* return_prop = Unreal::CastField<Unreal::FStructProperty>(function ? function->GetReturnProperty() : nullptr);
+        if (!return_prop)
+        {
+            out.failure = STR("brush_query_return_struct_unavailable");
+            return out;
+        }
+
+        out.params_ok = true;
+        auto* base = prop_value_ptr(params, return_prop);
+        const auto* structure = struct_type(return_prop);
+        if (!structure)
+        {
+            out.failure = STR("brush_query_struct_unavailable");
+            return out;
+        }
+        if (auto* success_prop = find_struct_property(structure, STR("bSuccess")))
+        {
+            out.success = read_bool(success_prop, base);
+        }
+        else
+        {
+            out.failure = STR("brush_query_success_unavailable");
+        }
+        if (auto* has_uv_prop = find_struct_property(structure, STR("bHasUV")))
+        {
+            out.has_uv = read_bool(has_uv_prop, base);
+        }
+        if (auto uv = read_vector2_from_struct(structure, base, STR("HitUV")))
+        {
+            out.u = uv->first;
+            out.v = uv->second;
+            out.has_uv = out.has_uv || (std::isfinite(out.u) && std::isfinite(out.v));
+        }
+        if (auto world_position = read_vector_from_struct(structure, base, STR("WorldPosition")))
+        {
+            out.world_position = *world_position;
+        }
+        if (auto normal = read_vector_from_struct(structure, base, STR("WorldNormal")))
+        {
+            out.normal = *normal;
+        }
+        out.component = read_object_from_struct(structure, base, STR("HitComponent"));
+        out.actor = read_object_from_struct(structure, base, STR("HitActor"));
+        if (auto face_index = read_number_from_struct(structure, base, STR("FaceIndex")))
+        {
+            out.face_index = static_cast<int>(*face_index);
+        }
+        if (auto distance = read_number_from_struct(structure, base, STR("Distance")))
+        {
+            out.distance = *distance;
+        }
+        if (!out.success && out.failure.empty())
+        {
+            out.failure = STR("brush_query_unsuccessful");
         }
         return out;
     }
@@ -3427,6 +3551,36 @@ namespace
         return read_return_bool(function, params.data());
     }
 
+    auto call_single_number_param(Unreal::UObject* object, const CharType* function_name, double value) -> bool
+    {
+        if (!object)
+        {
+            return false;
+        }
+        auto* function = object->GetFunctionByNameInChain(function_name);
+        if (!function)
+        {
+            return false;
+        }
+        std::vector<uint8_t> params(static_cast<size_t>(function->GetParmsSize()), 0);
+        bool wrote = false;
+        for (auto* property : function->ForEachProperty())
+        {
+            if (!property || !property->HasAnyPropertyFlags(Unreal::CPF_Parm) ||
+                property->HasAnyPropertyFlags(Unreal::CPF_ReturnParm))
+            {
+                continue;
+            }
+            wrote = write_number(property, params.data(), value) || wrote;
+        }
+        if (!wrote)
+        {
+            return false;
+        }
+        object->ProcessEvent(function, params.data());
+        return true;
+    }
+
     auto call_vector2_param(Unreal::UObject* object, const CharType* function_name, double x, double y) -> bool
     {
         if (!object)
@@ -3455,6 +3609,104 @@ namespace
         }
         object->ProcessEvent(function, params.data());
         return read_return_bool(function, params.data());
+    }
+
+    auto find_screen_space_brush_query_for_pawn(Unreal::UObject* pawn) -> Unreal::UObject*
+    {
+        if (!pawn)
+        {
+            return nullptr;
+        }
+        if (auto* query = read_object_property_by_name(pawn, STR("ScreenSpaceBrushQuery")))
+        {
+            if (query->GetFunctionByNameInChain(STR("QueryFromWorldRay")))
+            {
+                return query;
+            }
+        }
+
+        std::vector<Unreal::UObject*> queries{};
+        Unreal::UObjectGlobals::FindObjects(128, STR("ScreenSpaceBrushQuery"), nullptr, queries, 0, 0, false);
+        for (auto* query : queries)
+        {
+            if (!query || !query->GetFunctionByNameInChain(STR("QueryFromWorldRay")))
+            {
+                continue;
+            }
+            if (object_is_or_belongs_to(query, pawn))
+            {
+                return query;
+            }
+        }
+        return nullptr;
+    }
+
+    auto configure_screen_space_brush_query(Unreal::UObject* query, Unreal::UObject* pawn, Unreal::UObject* mesh) -> bool
+    {
+        if (!query || !pawn || !mesh)
+        {
+            return false;
+        }
+        call_no_params_void(query, STR("ResetFilter"));
+        call_no_params_void(query, STR("ClearTargetComponents"));
+        call_no_params_void(query, STR("ClearTargetActors"));
+        call_no_params_void(query, STR("ClearNoCollisionMeshTargets"));
+        call_no_params_void(query, STR("ClearIgnoreActors"));
+        call_single_number_param(query, STR("SetUVChannel"), 0.0);
+        call_single_number_param(query, STR("SetMaxTraceDistance"), 12000.0);
+        call_single_bool_param(query, STR("SetTraceComplex"), true);
+        call_single_bool_param(query, STR("SetAllowNoCollisionMesh"), true);
+        const auto actor_ok = call_object_param(query, STR("AddTargetActor"), pawn);
+        const auto component_ok = call_object_param(query, STR("AddTargetComponent"), mesh);
+        const auto no_collision_ok = call_object_param(query, STR("AddNoCollisionMeshTarget"), mesh);
+        return query->GetFunctionByNameInChain(STR("QueryFromWorldRay")) &&
+               (actor_ok || component_ok || no_collision_ok);
+    }
+
+    auto query_brush_from_world_ray(Unreal::UObject* query,
+                                    const Unreal::FVector& origin,
+                                    const Unreal::FVector& direction) -> BrushQueryHit
+    {
+        BrushQueryHit out{};
+        if (!query)
+        {
+            out.failure = STR("brush_query_unavailable");
+            return out;
+        }
+        auto* function = query->GetFunctionByNameInChain(STR("QueryFromWorldRay"));
+        if (!function)
+        {
+            out.failure = STR("query_from_world_ray_unavailable");
+            return out;
+        }
+        std::vector<uint8_t> params(static_cast<size_t>(function->GetParmsSize()), 0);
+        bool wrote_origin = false;
+        bool wrote_direction = false;
+        for (auto* property : function->ForEachProperty())
+        {
+            if (!property || !property->HasAnyPropertyFlags(Unreal::CPF_Parm) ||
+                property->HasAnyPropertyFlags(Unreal::CPF_ReturnParm))
+            {
+                continue;
+            }
+            const auto name = lower_copy(property->GetName());
+            if (contains_text(name, STR("origin")))
+            {
+                wrote_origin = write_vector(property, params.data(), origin) || wrote_origin;
+            }
+            else if (contains_text(name, STR("direction")))
+            {
+                wrote_direction = write_vector(property, params.data(), normalize(direction)) || wrote_direction;
+            }
+        }
+        if (!wrote_origin || !wrote_direction)
+        {
+            out.failure = !wrote_origin ? STR("brush_query_origin_param_unresolved")
+                                         : STR("brush_query_direction_param_unresolved");
+            return out;
+        }
+        query->ProcessEvent(function, params.data());
+        return decode_brush_query_result(function, params.data());
     }
 
     auto call_anchors_param(Unreal::UObject* object,
@@ -4840,6 +5092,16 @@ namespace
         StringType failure{STR("not_run")};
     };
 
+    struct ProjectedFramePoint
+    {
+        bool ok{false};
+        bool inside{false};
+        double nx{0.0};
+        double ny{0.0};
+        double depth{0.0};
+        StringType failure{STR("not_run")};
+    };
+
     auto deproject_screen_position(Unreal::UObject* controller, double screen_x, double screen_y) -> DeprojectRay
     {
         DeprojectRay out{};
@@ -5067,6 +5329,38 @@ namespace
             ++stats.ok;
         }
         return stats;
+    }
+
+    auto project_world_to_frame_normalized(const ProjectionFrame& frame,
+                                           const ViewportInfo& viewport,
+                                           const Unreal::FVector& world_position) -> ProjectedFramePoint
+    {
+        ProjectedFramePoint out{};
+        const auto delta = sub(world_position, frame.eye);
+        const auto depth = dot(delta, frame.forward);
+        out.depth = depth;
+        if (depth <= 1.0 || viewport.width <= 0 || viewport.height <= 0)
+        {
+            out.failure = STR("frame_projection_behind_camera");
+            return out;
+        }
+        const auto aspect = static_cast<double>(std::max(1, viewport.width)) /
+                            static_cast<double>(std::max(1, viewport.height));
+        const auto tan_half_h = std::tan(clamp(frame.fov_degrees, 10.0, 150.0) * Pi / 360.0);
+        if (!std::isfinite(tan_half_h) || tan_half_h <= 0.00001)
+        {
+            out.failure = STR("frame_projection_fov_invalid");
+            return out;
+        }
+        const auto tan_half_v = tan_half_h / std::max(0.1, aspect);
+        const auto x_ndc = dot(delta, frame.right) / (depth * tan_half_h);
+        const auto y_ndc = dot(delta, frame.up) / (depth * tan_half_v);
+        out.nx = 0.5 + x_ndc * 0.5;
+        out.ny = 0.5 - y_ndc * 0.5;
+        out.ok = std::isfinite(out.nx) && std::isfinite(out.ny);
+        out.inside = out.ok && out.nx >= -0.02 && out.ny >= -0.02 && out.nx <= 1.02 && out.ny <= 1.02;
+        out.failure = out.ok ? StringType{} : STR("frame_projection_invalid");
+        return out;
     }
 
     auto is_floor_like_object(Unreal::UObject* actor, Unreal::UObject* component) -> bool
@@ -5565,6 +5859,283 @@ namespace
         return color;
     }
 
+    auto collect_brush_query_side_samples(Unreal::UObject* component,
+                                          Unreal::UObject* pawn,
+                                          Unreal::UObject* mesh,
+                                          Unreal::UObject* controller,
+                                          const ViewportInfo& viewport,
+                                          const ProjectionFrame& frame,
+                                          const RenderTargetImage& hidden_image,
+                                          const ScreenTransform& capture_transform,
+                                          const std::vector<ResolvedSurfaceSeed>& direct_seeds,
+                                          ProbeState& state,
+                                          BrushQuerySideStats& stats) -> std::vector<ScreenHitSample>
+    {
+        std::vector<ScreenHitSample> side_samples{};
+        if (!component || !pawn || !mesh || !controller || viewport.width <= 0 || viewport.height <= 0 ||
+            !hidden_image.ok || direct_seeds.empty() || state.cancelled)
+        {
+            stats.first_failure = STR("side_brush_query_prereq_unavailable");
+            return side_samples;
+        }
+
+        auto* query = find_screen_space_brush_query_for_pawn(pawn);
+        if (!query)
+        {
+            stats.first_failure = STR("screen_space_brush_query_unavailable");
+            return side_samples;
+        }
+        stats.query_name = query->GetFullName();
+        if (!configure_screen_space_brush_query(query, pawn, mesh))
+        {
+            stats.first_failure = STR("screen_space_brush_query_config_failed");
+            return side_samples;
+        }
+
+        Unreal::FVector min_world = direct_seeds.front().world_position;
+        Unreal::FVector max_world = direct_seeds.front().world_position;
+        Unreal::FVector sum_world{};
+        for (const auto& sample : direct_seeds)
+        {
+            sum_world = add(sum_world, sample.world_position);
+            min_world = vec(std::min(min_world.X(), sample.world_position.X()),
+                            std::min(min_world.Y(), sample.world_position.Y()),
+                            std::min(min_world.Z(), sample.world_position.Z()));
+            max_world = vec(std::max(max_world.X(), sample.world_position.X()),
+                            std::max(max_world.Y(), sample.world_position.Y()),
+                            std::max(max_world.Z(), sample.world_position.Z()));
+        }
+        const auto center = mul(sum_world, 1.0 / static_cast<double>(std::max<size_t>(1, direct_seeds.size())));
+        const auto extent = sub(max_world, min_world);
+        const auto half_width = clamp(std::max({std::abs(extent.X()), std::abs(extent.Y()), 96.0}) * 0.72, 80.0, 240.0);
+        const auto half_height = clamp(std::max(std::abs(extent.Z()) * 0.72, 120.0), 100.0, 300.0);
+        const auto ray_distance = clamp(std::max({std::abs(extent.X()), std::abs(extent.Y()), std::abs(extent.Z()), 160.0}) * 2.6,
+                                        240.0,
+                                        760.0);
+        auto base_outward = sub(frame.eye, center);
+        base_outward = vec(base_outward.X(), base_outward.Y(), 0.0);
+        if (length(base_outward) < 0.01)
+        {
+            base_outward = mul(frame.forward, -1.0);
+            base_outward = vec(base_outward.X(), base_outward.Y(), 0.0);
+        }
+        base_outward = normalize(base_outward);
+
+        const std::array<double, 9> yaw_offsets{{-150.0, -120.0, -90.0, -60.0, 60.0, 90.0, 120.0, 150.0, 180.0}};
+        const std::array<double, 3> pitch_offsets{{-22.0, 0.0, 22.0}};
+        constexpr int grid_x = 24;
+        constexpr int grid_y = 36;
+        std::unordered_set<std::uint64_t> unique_side_texels{};
+        unique_side_texels.reserve(8192);
+        side_samples.reserve(16384);
+
+        const auto encode_texel = [](double u, double v) -> std::uint64_t {
+            const auto x = static_cast<std::uint64_t>(std::max(0, std::min(4095, static_cast<int>(u * 4096.0))));
+            const auto y = static_cast<std::uint64_t>(std::max(0, std::min(4095, static_cast<int>(v * 4096.0))));
+            return (y << 32) | x;
+        };
+
+        const auto nearest_direct_source = [&](const Unreal::FVector& world_position) -> const ResolvedSurfaceSeed* {
+            const ResolvedSurfaceSeed* best = nullptr;
+            double best_score = 1000000000000.0;
+            for (const auto& seed : direct_seeds)
+            {
+                const auto delta = sub(seed.world_position, world_position);
+                const auto right_delta = dot(delta, frame.right);
+                const auto up_delta = dot(delta, frame.up);
+                const auto forward_delta = dot(delta, frame.forward);
+                const auto score = right_delta * right_delta +
+                                   up_delta * up_delta * 1.35 +
+                                   forward_delta * forward_delta * 0.16;
+                if (score < best_score)
+                {
+                    best_score = score;
+                    best = &seed;
+                }
+            }
+            return best;
+        };
+
+        const auto try_add_side_ray = [&](const Unreal::FVector& origin, const Unreal::FVector& ray_dir) -> void {
+            ++stats.attempts;
+            auto hit = query_brush_from_world_ray(query, origin, ray_dir);
+            if (!hit.params_ok)
+            {
+                if (stats.first_failure.empty())
+                {
+                    stats.first_failure = hit.failure.empty() ? STR("brush_query_params_failed") : hit.failure;
+                }
+                return;
+            }
+            if (!hit.success)
+            {
+                return;
+            }
+            ++stats.success;
+            const auto owner_hit = hit.component == mesh || object_is_or_belongs_to(hit.actor, pawn) ||
+                                   object_is_or_belongs_to(hit.component, pawn);
+            if (!owner_hit)
+            {
+                return;
+            }
+            ++stats.owner_hits;
+            if (!hit.has_uv || !std::isfinite(hit.u) || !std::isfinite(hit.v))
+            {
+                return;
+            }
+            ++stats.uv_hits;
+            if (length(hit.normal) > 0.01 && dot(normalize(hit.normal), ray_dir) > 0.35)
+            {
+                ++stats.normal_suspect;
+            }
+
+            const auto texel_key = encode_texel(hit.u, hit.v);
+            if (!unique_side_texels.insert(texel_key).second)
+            {
+                ++stats.duplicate_texels;
+                return;
+            }
+
+            auto frame_projection = project_world_to_frame_normalized(frame, viewport, hit.world_position);
+            double nx = 0.5;
+            double ny = 0.5;
+            double sample_nx = 0.5;
+            double sample_ny = 0.5;
+            std::optional<Color> color{};
+            if (frame_projection.inside)
+            {
+                nx = clamp(frame_projection.nx, 0.0, 0.999999);
+                ny = clamp(frame_projection.ny, 0.0, 0.999999);
+                sample_nx = transform_screen_coord(nx,
+                                                   capture_transform.scale_x,
+                                                   capture_transform.offset_x,
+                                                   capture_transform.flip_x,
+                                                   capture_transform.pivot_x);
+                sample_ny = transform_screen_coord(ny,
+                                                   capture_transform.scale_y,
+                                                   capture_transform.offset_y,
+                                                   capture_transform.flip_y,
+                                                   capture_transform.pivot_y);
+                color = sample_image_at(hidden_image, sample_nx, sample_ny);
+                if (color)
+                {
+                    ++stats.frame_projected_pixels;
+                    ++stats.projected_pixels;
+                }
+            }
+            else
+            {
+                ++stats.out_of_view;
+            }
+
+            const auto* nearest = nearest_direct_source(hit.world_position);
+            if (!color && nearest)
+            {
+                color = nearest->color;
+                nx = 0.5;
+                ny = 0.5;
+                sample_nx = 0.5;
+                sample_ny = 0.5;
+                ++stats.nearest_sources;
+            }
+            if (!color)
+            {
+                ++stats.no_color;
+                return;
+            }
+
+            ScreenHitSample sample{};
+            sample.screen_x = nx * static_cast<double>(std::max(1, viewport.width));
+            sample.screen_y = ny * static_cast<double>(std::max(1, viewport.height));
+            sample.nx = nx;
+            sample.ny = ny;
+            sample.capture_nx = sample_nx;
+            sample.capture_ny = sample_ny;
+            sample.u = clamp(hit.u, 0.0, 0.999999);
+            sample.v = clamp(hit.v, 0.0, 0.999999);
+            sample.world_position = hit.world_position;
+            sample.normal = hit.normal;
+            auto traced = trace_nearest_background_behind_sample(pawn, frame.eye, sample);
+            auto material_hint = traced.hit ? traced.color : *color;
+            if (traced.hit)
+            {
+                ++stats.material_hits;
+            }
+            auto resolved = sanitize_background_color(*color, material_hint);
+            if (traced.hit)
+            {
+                resolved.roughness = material_hint.roughness;
+                resolved.metallic = material_hint.metallic;
+            }
+            const auto floor_like = traced.floor_like || (nearest && nearest->floor_like);
+            resolved = compensate_projected_albedo_preserve_material(resolved, floor_like);
+            sample.color = resolved;
+            sample.floor_like = floor_like;
+            side_samples.push_back(sample);
+            ++stats.seeds;
+        };
+
+        size_t virtual_view_index = 0;
+        for (const auto yaw : yaw_offsets)
+        {
+            for (const auto pitch : pitch_offsets)
+            {
+                if (state.cancelled)
+                {
+                    return side_samples;
+                }
+                const auto outward = normalize(rotate_yaw_pitch(base_outward, yaw, pitch));
+                const auto origin_center = add(center, mul(outward, ray_distance));
+                const auto view_forward = normalize(sub(center, origin_center));
+                auto view_right = normalize(cross(vec(0.0, 0.0, 1.0), view_forward));
+                if (length(view_right) < 0.01)
+                {
+                    view_right = frame.right;
+                }
+                auto view_up = normalize(cross(view_forward, view_right));
+                if (length(view_up) < 0.01)
+                {
+                    view_up = vec(0.0, 0.0, 1.0);
+                }
+
+                for (int y = 0; y < grid_y; ++y)
+                {
+                    for (int x = 0; x < grid_x; ++x)
+                    {
+                        const auto lx = ((static_cast<double>(x) + 0.5) / static_cast<double>(grid_x) - 0.5) * 2.0;
+                        const auto ly = ((static_cast<double>(y) + 0.5) / static_cast<double>(grid_y) - 0.5) * 2.0;
+                        const auto target = add(add(center, mul(view_right, lx * half_width)), mul(view_up, ly * half_height));
+                        const auto ray_dir = normalize(sub(target, origin_center));
+                        try_add_side_ray(origin_center, ray_dir);
+                    }
+                }
+
+                constexpr int direct_target_rays_per_view = 512;
+                const auto seed_count = direct_seeds.size();
+                const auto stride = std::max<size_t>(1, seed_count / static_cast<size_t>(direct_target_rays_per_view));
+                const auto view_offset = (virtual_view_index * 131u) % std::max<size_t>(1, seed_count);
+                const auto target_rays = std::min<size_t>(static_cast<size_t>(direct_target_rays_per_view), seed_count);
+                for (size_t i = 0; i < target_rays; ++i)
+                {
+                    const auto seed_index = (view_offset + i * stride) % seed_count;
+                    const auto jitter_x = (static_cast<double>((i * 17u + virtual_view_index * 7u) % 11u) - 5.0) * 1.4;
+                    const auto jitter_y = (static_cast<double>((i * 23u + virtual_view_index * 5u) % 13u) - 6.0) * 1.2;
+                    const auto target = add(add(direct_seeds[seed_index].world_position, mul(view_right, jitter_x)),
+                                            mul(view_up, jitter_y));
+                    const auto ray_dir = normalize(sub(target, origin_center));
+                    try_add_side_ray(origin_center, ray_dir);
+                }
+                ++virtual_view_index;
+            }
+        }
+
+        if (stats.first_failure.empty())
+        {
+            stats.first_failure = stats.seeds > 0 ? STR("<none>") : STR("brush_query_side_no_seeds");
+        }
+        (void)component;
+        return side_samples;
+    }
 
     auto percentile_sorted(std::vector<double> values, double percentile) -> double
     {
@@ -5943,6 +6514,17 @@ namespace
         state.failures = 0;
         state.paint_world_success = 0;
         state.paint_uv_success = 0;
+        state.side_enabled = 0;
+        state.side_query_attempts = 0;
+        state.side_query_success = 0;
+        state.side_query_uv_hits = 0;
+        state.side_projected_pixels = 0;
+        state.side_material_hits = 0;
+        state.side_seeds = 0;
+        state.side_nearest_sources = 0;
+        state.side_duplicate_texels = 0;
+        state.side_normal_suspect = 0;
+        state.side_backend = STR("disabled");
         state.commit_calls = 0;
         state.body_trace_hits = 0;
         state.background_trace_hits = 0;
@@ -6605,14 +7187,6 @@ namespace
             return false;
         }
 
-        struct ResolvedPaintSeed
-        {
-            double u{0.0};
-            double v{0.0};
-            Color color{};
-            bool floor_like{false};
-        };
-
         const auto export_start = SteadyClock::now();
         const auto albedo_before = export_channel_bytes(component, 0);
         const auto metallic_before = export_channel_bytes(component, 1);
@@ -6636,7 +7210,7 @@ namespace
         }
 
         const auto seed_start = SteadyClock::now();
-        std::vector<ResolvedPaintSeed> paint_seeds{};
+        std::vector<ResolvedSurfaceSeed> paint_seeds{};
         paint_seeds.reserve(samples.size());
         int missing_color = 0;
         int material_values = 0;
@@ -6701,7 +7275,13 @@ namespace
             metallic_sum += color.metallic;
             ++material_values;
 
-            paint_seeds.push_back(ResolvedPaintSeed{samples[i].u, samples[i].v, color, floor_like});
+            paint_seeds.push_back(ResolvedSurfaceSeed{
+                samples[i].u,
+                samples[i].v,
+                color,
+                floor_like,
+                samples[i].world_position,
+                samples[i].normal});
         }
         const auto seed_ms = elapsed_ms_since(seed_start);
         const auto capture_trace_chroma_avg =
@@ -6766,9 +7346,65 @@ namespace
             return false;
         }
 
+        BrushQuerySideStats side_stats{};
+        auto side_samples = collect_brush_query_side_samples(component,
+                                                             pawn,
+                                                             mesh,
+                                                             controller,
+                                                             viewport,
+                                                             *frame,
+                                                             bulk_capture.image,
+                                                             bulk_capture.image.bulk_to_pixel_transform,
+                                                             paint_seeds,
+                                                             state,
+                                                             side_stats);
+        state.side_query_attempts = side_stats.attempts;
+        state.side_query_success = side_stats.success;
+        state.side_query_uv_hits = side_stats.uv_hits;
+        state.side_projected_pixels = side_stats.projected_pixels;
+        state.side_material_hits = side_stats.material_hits;
+        state.side_seeds = side_stats.seeds;
+        state.side_nearest_sources = side_stats.nearest_sources;
+        state.side_duplicate_texels = side_stats.duplicate_texels;
+        state.side_normal_suspect = side_stats.normal_suspect;
+        constexpr int min_side_seeds = 64;
+        if (static_cast<int>(side_samples.size()) >= min_side_seeds)
+        {
+            state.side_enabled = 1;
+            state.side_backend = STR("screen_space_brush_query_v1");
+        }
+        else
+        {
+            state.side_enabled = 0;
+            state.side_backend = side_stats.first_failure.empty()
+                                     ? STR("screen_space_brush_query_v1_low_coverage_disabled")
+                                     : STR("screen_space_brush_query_v1_failed_disabled");
+            side_samples.clear();
+        }
+        RC::Output::send<RC::LogLevel::Warning>(
+            STR("{} side screen_space_brush_query_v1 enabled={} query={} attempts={} success={} owner_hits={} uv_hits={} projected_pixels={} frame_projected_pixels={} nearest_sources={} material_hits={} seeds={} duplicate_texels={} normal_suspect={} out_of_view={} no_color={} min_side_seeds={} first_failure={}\n"),
+            ModTag,
+            state.side_enabled,
+            side_stats.query_name.empty() ? STR("<none>") : side_stats.query_name,
+            side_stats.attempts,
+            side_stats.success,
+            side_stats.owner_hits,
+            side_stats.uv_hits,
+            side_stats.projected_pixels,
+            side_stats.frame_projected_pixels,
+            side_stats.nearest_sources,
+            side_stats.material_hits,
+            side_stats.seeds,
+            side_stats.duplicate_texels,
+            side_stats.normal_suspect,
+            side_stats.out_of_view,
+            side_stats.no_color,
+            min_side_seeds,
+            side_stats.first_failure.empty() ? STR("<none>") : side_stats.first_failure);
+
         const auto atlas_start = SteadyClock::now();
         std::vector<MecchaCamouflage::Core::PaintSeed> core_seeds{};
-        core_seeds.reserve(paint_seeds.size());
+        core_seeds.reserve(paint_seeds.size() + side_samples.size());
         for (const auto& seed : paint_seeds)
         {
             core_seeds.push_back(MecchaCamouflage::Core::PaintSeed{
@@ -6780,7 +7416,26 @@ namespace
                     seed.color.b,
                     seed.color.roughness,
                     seed.color.metallic},
-                seed.floor_like});
+                seed.floor_like,
+                seed.floor_like ? 12 : 11,
+                2,
+                seed.floor_like ? 88.0 : 72.0});
+        }
+        for (const auto& sample : side_samples)
+        {
+            core_seeds.push_back(MecchaCamouflage::Core::PaintSeed{
+                sample.u,
+                sample.v,
+                MecchaCamouflage::Core::Color{
+                    sample.color.r,
+                    sample.color.g,
+                    sample.color.b,
+                    sample.color.roughness,
+                    sample.color.metallic},
+                sample.floor_like,
+                sample.floor_like ? 8 : 7,
+                3,
+                sample.floor_like ? 48.0 : 42.0});
         }
         const auto assembled_texture = MecchaCamouflage::Core::assemble_direct_texture(
             MecchaCamouflage::Core::ChannelBuffer{albedo_before.width, albedo_before.height, albedo_before.bytes},
@@ -6851,9 +7506,11 @@ namespace
         state.verified_paint_function = STR("ImportChannelFromBytes.screen_body_direct_only");
         state.last_failure = state.verified_visible_backend ? STR("play_screen_body_direct_only_applied")
                                                             : STR("play_screen_body_direct_only_unverified");
+        const auto fill_mode = state.side_enabled ? STR("direct_plus_screen_space_brush_query_side")
+                                                  : STR("direct_only_no_side");
 
         RC::Output::send<RC::LogLevel::Warning>(
-            STR("{} play screen_body result reason={} success={} visible_backend={} queued_strokes=0 import_backend=1 albedo_import_ok={} albedo_observed={} metallic_import_ok={} metallic_observed={} roughness_import_ok={} roughness_observed={} missing_color={} hash_before={} hash_after={} hash_changed={} body_samples={} paint_seeds={} target_samples={} min_samples={} hard_max_attempts={} coarse_hits={} refined_hits={} bbox_norm=({}, {})-({}, {}) bbox_px={}x{} refine_grid={}x{} rt_size={}x{} texture_size={}x{} uv_coverage={} filled_by_direct={} filled_by_extension={} filled_by_floor={} direct_texels={} edge_texels={} extruded_texels={} fallback_extruded_texels={} preserved_direct={} preserved_original={} worker_threads={} readback_backend={} trace_primary=1 no_scene_capture=0 texture_source_verified=1 capture_color_used={} trace_only_color_used={} capture_trace_pairs={} capture_trace_chroma_avg={} capture_trace_chroma_p95={} capture_trace_chroma_max={} selected_capture_fov={} capture_transform_backend={} capture_transform_scale=({}, {}) capture_transform_offset=({}, {}) capture_transform_flip=({}, {}) image_ok={} image_failure={} image_bulk_calibration_ok={} image_bulk_transform_flip=({}, {}) image_bulk_transform_scale=({}, {}) image_bulk_transform_offset=({}, {}) background_pixels={} capture_uniform={} capture_clear_suspect={} rgb_min=({}, {}, {}) rgb_avg=({}, {}, {}) rgb_max=({}, {}, {}) metallic_avg={} roughness_avg={} channel={} label=ImportChannelFromBytes first_failure={} t_hit_ms={} t_trace_ms={} t_alignment_ms={} t_capture_ms={} t_export_ms={} t_seed_ms={} t_atlas_ms={} t_import_ms={} t_total_ms={} frame_fov={} fov_source={} camera_fov={} deproject_hfov={} viewport={}x{} no_clear=1 no_commit=1 no_mesh_hide=1 no_palette_fallback=1 no_trace_color_fallback=1 fallback_used=0 side_enabled=0 uv_extend=0 fill_mode=direct_only_no_side direct_layer_priority=1\n"),
+            STR("{} play screen_body result reason={} success={} visible_backend={} queued_strokes=0 import_backend=1 albedo_import_ok={} albedo_observed={} metallic_import_ok={} metallic_observed={} roughness_import_ok={} roughness_observed={} missing_color={} hash_before={} hash_after={} hash_changed={} body_samples={} paint_seeds={} side_seeds={} target_samples={} min_samples={} hard_max_attempts={} coarse_hits={} refined_hits={} bbox_norm=({}, {})-({}, {}) bbox_px={}x{} refine_grid={}x{} rt_size={}x{} texture_size={}x{} uv_coverage={} filled_by_direct={} filled_by_extension={} filled_by_floor={} direct_texels={} edge_texels={} extruded_texels={} fallback_extruded_texels={} preserved_direct={} preserved_original={} worker_threads={} readback_backend={} trace_primary=1 no_scene_capture=0 texture_source_verified=1 capture_color_used={} trace_only_color_used={} capture_trace_pairs={} capture_trace_chroma_avg={} capture_trace_chroma_p95={} capture_trace_chroma_max={} selected_capture_fov={} capture_transform_backend={} capture_transform_scale=({}, {}) capture_transform_offset=({}, {}) capture_transform_flip=({}, {}) image_ok={} image_failure={} image_bulk_calibration_ok={} image_bulk_transform_flip=({}, {}) image_bulk_transform_scale=({}, {}) image_bulk_transform_offset=({}, {}) background_pixels={} capture_uniform={} capture_clear_suspect={} rgb_min=({}, {}, {}) rgb_avg=({}, {}, {}) rgb_max=({}, {}, {}) metallic_avg={} roughness_avg={} channel={} label=ImportChannelFromBytes first_failure={} t_hit_ms={} t_trace_ms={} t_alignment_ms={} t_capture_ms={} t_export_ms={} t_seed_ms={} t_atlas_ms={} t_import_ms={} t_total_ms={} frame_fov={} fov_source={} camera_fov={} deproject_hfov={} viewport={}x{} no_clear=1 no_commit=1 no_mesh_hide=1 no_palette_fallback=1 no_trace_color_fallback=1 fallback_used=0 side_enabled={} side_backend={} uv_extend=0 fill_mode={} direct_layer_priority=1\n"),
             ModTag,
             reason.empty() ? STR("<none>") : reason,
             state.success,
@@ -6870,6 +7527,7 @@ namespace
             changed ? 1 : 0,
             samples.size(),
             static_cast<int>(paint_seeds.size()),
+            static_cast<int>(side_samples.size()),
             target_paint_hits,
             min_paint_hits,
             hard_max_attempts,
@@ -6952,7 +7610,10 @@ namespace
             frame->camera_fov_degrees,
             frame->deproject_hfov,
             viewport.width,
-            viewport.height);
+            viewport.height,
+            state.side_enabled,
+            state.side_backend,
+            fill_mode);
         RC::Output::send<RC::LogLevel::Verbose>(
             STR("{} play screen_body projection_material projected_ok={} projected_failed={} projected_out_of_view={} projected_delta_avg_px={} projected_delta_max_px={} trace_hits={} trace_misses={} trace_floor_hits={} trace_self_skips={} trace_channel_attempts={} trace_distance_avg={} trace_distance_max={} trace_forward_avg={} trace_right_avg={} trace_right_abs_avg={} trace_up_avg={} trace_up_abs_avg={} trace_project_samples={} trace_project_delta_avg_px={} trace_project_delta_max_px={} roughness_samples={} roughness_min={} roughness_avg={} roughness_max={} metallic_min={} metallic_avg={} metallic_max={} t_trace_ms={} readback_backend={}\n"),
             ModTag,
@@ -7163,7 +7824,18 @@ namespace
                 m_state.verified_visible_backend,
                 m_state.body_trace_hits,
                 m_state.uv_hits,
+                m_state.side_enabled,
+                m_state.side_query_attempts,
+                m_state.side_query_success,
+                m_state.side_query_uv_hits,
+                m_state.side_projected_pixels,
+                m_state.side_material_hits,
+                m_state.side_seeds,
+                m_state.side_nearest_sources,
+                m_state.side_duplicate_texels,
+                m_state.side_normal_suspect,
                 narrow_ascii(m_state.verified_paint_function),
+                narrow_ascii(m_state.side_backend),
                 narrow_ascii(m_state.last_failure),
                 narrow_ascii(m_state.current_world),
                 narrow_ascii(m_state.current_pawn),

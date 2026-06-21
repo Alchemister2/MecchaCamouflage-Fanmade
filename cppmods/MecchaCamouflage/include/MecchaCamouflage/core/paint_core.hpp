@@ -21,6 +21,9 @@ namespace MecchaCamouflage::Core
         double v{0.0};
         Color color{};
         bool floor_like{false};
+        int priority{0};
+        int radius{2};
+        double weight{0.0};
     };
 
     struct ChannelBuffer
