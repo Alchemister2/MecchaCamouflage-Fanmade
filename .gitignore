@@ -1,14 +1,7 @@
 # Build output
-/build/
-/build-dev/
+/.build/
 /out/
-/dist/
 /packages/
-/p/.venv/
-/p/dist/
-/p/out/
-/p/build_pyexe/
-/p/native/bin/
 *.obj
 
 
@@ -44,6 +37,9 @@ __pycache__/
 *.log
 *.trace
 *.tmp
+
+# Tool-local build output
+/tools/Dumper-7/build/
 
 # IDE / OS noise
 /.vs/

@@ -1,62 +1,87 @@
 <p align="center">
-  <img
-    src="assets/meccha-camouflage-banner.png"
-    alt="Meccha Camouflage banner"
-    width="100%"
-  />
+  <img src="assets/meccha-camouflage-banner.png" alt="Meccha Camouflage banner" width="100%" />
 </p>
 
-# MecchaCamouflage
+# Meccha Camouflage Runtime
 
-Mod for [MECCHA CHAMELEON](https://store.steampowered.com/app/4704690/).
+This repository is now centered on the Xenos-injected `p` runtime. The active runtime lives at the repository root:
 
-<p align="center">
-  <img
-    src="assets/demo.png"
-    alt="Meccha Camouflage demo"
-    width="100%"
-  />
-</p>
+- `src/`: Python orchestration service and CLI.
+- `native/`: C++ injector and injected bridge.
+- `scripts/`: build, deploy, and SDK dump workflow scripts.
+- `dumper-sdk/`: managed Dumper7 SDK output for the target game build.
+- `tools/Dumper-7/`: local Dumper-7 tool source.
+- `archives/`: legacy UE4SS implementation and notes, kept for reference only.
 
-[Download](https://github.com/acentrist/MecchaCamouflage/releases/latest).
+The old UE4SS runtime is not part of the active build/deploy path.
 
-Extract the release zip into:
+## Build
+
+From the repository root:
+
+```bash
+./scripts/dev_flow.sh -Action build
+```
+
+Build output is written under `.build/`:
+
+```text
+.build/
+  native/bin/                 # injected DLL and injector exe
+  native/obj/                 # native object files
+  pyinstaller/                # PyInstaller work/spec files
+  venv/                       # Python virtualenv
+  dist/meccha-camouflage.exe  # runtime exe
+```
+
+## Deploy
+
+```bash
+./scripts/dev_flow.sh -Action deploy -GameRoot 'C:\Program Files (x86)\Steam\steamapps\common\MECCHA CHAMELEON'
+```
+
+The deploy script installs `.build/dist/meccha-camouflage.exe` into:
 
 ```text
 C:\Program Files (x86)\Steam\steamapps\common\MECCHA CHAMELEON\Chameleon\Binaries\Win64
 ```
 
-After extraction, the important files should look like this:
+If the target exe is locked, deploy stages a `.pending.exe` and starts the replacement watcher.
+
+## Run
+
+The default runtime mode is the Xenos service path:
+
+```bash
+./scripts/dev_flow.sh -Action run
+```
+
+Direct Python usage is still supported for development:
+
+```bash
+python -m src --mode service --adapter xenos --print-summary
+python -m src --mode loop --adapter noop --loop-frames 5 --print-summary
+```
+
+Runtime diagnostics are written to:
 
 ```text
-C:\Program Files (x86)\Steam\steamapps\common\MECCHA CHAMELEON\
-  Chameleon\
-    Binaries\
-      Win64\
-        dwmapi.dll
-        UE4SS.dll
-        UE4SS-settings.ini
-        Mods\
-          mods.txt
-          MecchaCamouflage\
-            dlls\
-              main.dll
+%LOCALAPPDATA%\MecchaCamouflage\runtime\events.jsonl
+%LOCALAPPDATA%\MecchaCamouflage\runtime\last_status.json
+%LOCALAPPDATA%\MecchaCamouflage\runtime\runtime.log
 ```
 
-PowerShell install:
+## Route policy
 
-```powershell
-$GameRoot="C:\Program Files (x86)\Steam\steamapps\common\MECCHA CHAMELEON"; $InstallDir=Join-Path $GameRoot "Chameleon\Binaries\Win64"; $Release=Invoke-RestMethod "https://api.github.com/repos/acentrist/MecchaCamouflage/releases/latest"; $ZipUrl=($Release.assets | Where-Object { $_.name -like "*.zip" } | Select-Object -First 1).browser_download_url; $ZipPath=Join-Path $env:TEMP "meccha-camouflage.zip"; Invoke-WebRequest $ZipUrl -OutFile $ZipPath; Expand-Archive -Force $ZipPath $InstallDir
-```
+Current route policy is documented in `native/README.md`.
 
-Command Prompt install:
+High-level rules:
 
-```bat
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$GameRoot='C:\Program Files (x86)\Steam\steamapps\common\MECCHA CHAMELEON'; $InstallDir=Join-Path $GameRoot 'Chameleon\Binaries\Win64'; $Release=Invoke-RestMethod 'https://api.github.com/repos/acentrist/MecchaCamouflage/releases/latest'; $ZipUrl=($Release.assets | Where-Object { $_.name -like '*.zip' } | Select-Object -First 1).browser_download_url; $ZipPath=Join-Path $env:TEMP 'meccha-camouflage.zip'; Invoke-WebRequest $ZipUrl -OutFile $ZipPath; Expand-Archive -Force $ZipPath $InstallDir"
-```
+- Active multiplayer candidates must go through Xenos/native SDK routes.
+- Local-only texture import is not a default runtime path.
+- Material swap, synthetic UV placement, and memory-scan fallback are forbidden.
+- Python remains as orchestration in phase 1; a C++ service replacement is tracked in `docs/cpp-service-roadmap.md`.
 
-In game, aim the camera at the background you want to match, then press `F10`.
+## Archives
 
-Use at your own risk.
-
-License: [MIT](LICENSE.txt)
+Legacy UE4SS code, root scripts, and old notes are stored under `archives/`. They are not used by build/deploy.
