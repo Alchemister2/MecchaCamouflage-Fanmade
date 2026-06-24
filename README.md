@@ -6,6 +6,10 @@
 
 A standalone Windows tool for MECCHA CHAMELEON camouflage experiments.
 
+<p align="center">
+  <img src="assets/demno.png" alt="Meccha Camouflage banner" width="100%" />
+</p>
+
 ## Download
 
 Download the latest `meccha-camouflage.exe` from GitHub Releases:
