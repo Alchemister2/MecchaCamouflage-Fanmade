@@ -7,9 +7,9 @@ namespace meccha_sdk
 {
     namespace Offsets
     {
-        constexpr std::uintptr_t GObjects = 0x09F2F350;
-        constexpr std::uintptr_t GWorld = 0x09C78620;
-        constexpr std::uintptr_t ProcessEvent = 0x015D09B0;
+        constexpr std::uintptr_t GObjects = 0x09F32450;
+        constexpr std::uintptr_t GWorld = 0x09C7B620;
+        constexpr std::uintptr_t ProcessEvent = 0x015D0950;
         constexpr int ProcessEventIdx = 0x0000004C;
     }
 
