@@ -55,10 +55,10 @@ namespace meccha
         auto level_tag(const RuntimeEvent& event) -> std::string
         {
             if (event.level == "error")
-                return "ERROR";
+                return "[ERROR]";
             if (event.level == "warning")
-                return "WARN";
-            return "INFO";
+                return "[WARN]";
+            return "[INFO]";
         }
 
         auto progress_bar_text(double progress, int width = 26) -> std::string
@@ -76,6 +76,13 @@ namespace meccha
             return bar;
         }
 
+        auto format_count(double value) -> std::string
+        {
+            if (value < 0.0)
+                return "-";
+            return std::to_string(static_cast<long long>(value));
+        }
+
         auto passes_filter(const RuntimeEvent& event, bool show_info, bool show_warning, bool show_error) -> bool
         {
             if (event.level == "error")
@@ -90,6 +97,39 @@ namespace meccha
             const std::string prefix = event.clock + " " + level_tag(event) + " " + event.domain + " ";
             if (event.event == "paint_progress" && event.progress >= 0.0)
             {
+                if (event.stage == "mesh_server_batch_begin")
+                {
+                    const double total = extract_json_number(event.details_json, "server_strokes_total", -1.0);
+                    return prefix + "Server batch " + progress_bar_text(0.0) + " 0/" + format_count(total);
+                }
+                if (event.stage == "mesh_server_batch")
+                {
+                    const double sent = extract_json_number(event.details_json, "server_strokes_sent", -1.0);
+                    const double total = extract_json_number(event.details_json, "server_strokes_total", -1.0);
+                    const double progress = total > 0.0 ? sent / total : event.progress;
+                    return prefix + "Server batch " + progress_bar_text(progress) + " " +
+                           format_count(sent) + "/" + format_count(total);
+                }
+                if (event.stage == "mesh_local_visual_sync")
+                {
+                    const double synced = extract_json_number(event.details_json, "local_strokes_synced", 0.0);
+                    const double total = extract_json_number(event.details_json,
+                                                             "local_strokes_total",
+                                                             extract_json_number(event.details_json, "local_sync_strokes_total", -1.0));
+                    const double progress = total > 0.0 ? synced / total : 0.0;
+                    return prefix + "Apply " + progress_bar_text(progress) + " " +
+                           format_count(synced) + "/" + format_count(total);
+                }
+                if (event.stage == "mesh_apply_wait")
+                {
+                    const double pending = extract_json_number(event.details_json, "apply_pending_strokes", -1.0);
+                    const double initial = extract_json_number(event.details_json, "apply_initial_pending_strokes", -1.0);
+                    const double done = initial >= 0.0 && pending >= 0.0 ? std::max(0.0, initial - pending) : 0.0;
+                    const double progress = initial > 0.0 ? done / initial : 0.0;
+                    return prefix + "Apply " + progress_bar_text(progress) + " " +
+                           format_count(done) + "/" + format_count(initial) +
+                           " pending " + format_count(pending);
+                }
                 const std::string stage = event.stage.empty() ? "paint" : pretty_text(event.stage);
                 return prefix + progress_bar_text(std::min(0.98, event.progress)) + " " + stage + " " + event.message;
             }

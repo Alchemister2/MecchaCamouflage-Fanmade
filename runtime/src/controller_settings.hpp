@@ -9,7 +9,6 @@ namespace meccha
 
     struct PaintTuning
     {
-        std::string quality_preset{"High"};
         double stroke_size_texels{4.0};
         double coverage_step_texels{6.0};
         double side_source_max_uv{0.08};
@@ -24,7 +23,7 @@ namespace meccha
 
     struct AppSettings
     {
-        int layout_version{11};
+        int layout_version{12};
         float panel_x{-1.0f};
         float panel_y{-1.0f};
         float panel_width{1280.0f};

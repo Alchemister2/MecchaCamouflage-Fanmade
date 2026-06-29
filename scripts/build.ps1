@@ -25,11 +25,13 @@ $ControllerSources = @(
 $ImguiRoot = Join-Path $RuntimeRoot "third_party\imgui"
 $ImguiBackendRoot = Join-Path $ImguiRoot "backends"
 $IconSource = Join-Path $RuntimeRoot "assets\icon.ico"
-$FontArchive = Join-Path $RuntimeRoot "assets\fonts\d-din.zip"
+$IconPngSource = Join-Path $RuntimeRoot "assets\icon.png"
+$PrimaryFontArchive = Join-Path $RuntimeRoot "assets\fonts\arial.zip"
+$FallbackFontArchive = Join-Path $RuntimeRoot "assets\fonts\helvetica-255.zip"
 $FontExtractDir = Join-Path $ObjDir "fonts"
-$FontRegularPath = Join-Path $FontExtractDir "D-DIN.otf"
-$FontBoldPath = Join-Path $FontExtractDir "D-DIN-Bold.otf"
-$FontCondensedPath = Join-Path $FontExtractDir "D-DINCondensed.otf"
+$FontRegularPath = Join-Path $FontExtractDir "App-Regular.ttf"
+$FontSemiBoldPath = Join-Path $FontExtractDir "App-SemiBold.ttf"
+$FontBoldPath = Join-Path $FontExtractDir "App-Bold.ttf"
 $ImguiSources = @(
     (Join-Path $ImguiRoot "imgui.cpp"),
     (Join-Path $ImguiRoot "imgui_draw.cpp"),
@@ -46,8 +48,11 @@ foreach ($source in @($BridgeSource, $InjectorSource) + $ControllerSources + $Im
 if (-not (Test-Path $IconSource)) {
     throw "Application icon not found: $IconSource"
 }
-if (-not (Test-Path $FontArchive)) {
-    throw "Application font archive not found: $FontArchive"
+if (-not (Test-Path $IconPngSource)) {
+    throw "Application icon PNG not found: $IconPngSource"
+}
+if (-not (Test-Path $PrimaryFontArchive) -and -not (Test-Path $FallbackFontArchive)) {
+    throw "Application font archive not found. Expected $PrimaryFontArchive or $FallbackFontArchive"
 }
 
 function Quote-CmdArg([string]$Value) {
@@ -100,10 +105,42 @@ function Extract-ZipEntry {
         [Parameter(Mandatory = $true)][string]$EntryName,
         [Parameter(Mandatory = $true)][string]$OutPath
     )
-    $Entry = $Zip.Entries | Where-Object { $_.FullName -eq $EntryName } | Select-Object -First 1
+    $Entry = $Zip.Entries | Where-Object { $_.FullName -ieq $EntryName } | Select-Object -First 1
     if (-not $Entry) { throw "Font entry not found in archive: $EntryName" }
     if (Test-Path $OutPath) { Remove-Item -Force $OutPath }
     [System.IO.Compression.ZipFileExtensions]::ExtractToFile($Entry, $OutPath)
+}
+
+function Test-ZipEntry {
+    param(
+        [Parameter(Mandatory = $true)]$Zip,
+        [Parameter(Mandatory = $true)][string]$EntryName
+    )
+    return [bool]($Zip.Entries | Where-Object { $_.FullName -ieq $EntryName } | Select-Object -First 1)
+}
+
+function Select-AppFont {
+    param([Parameter(Mandatory = $true)]$Candidates)
+    foreach ($Candidate in $Candidates) {
+        if (-not (Test-Path $Candidate.Archive)) { continue }
+        $Zip = [System.IO.Compression.ZipFile]::OpenRead($Candidate.Archive)
+        try {
+            if ((Test-ZipEntry -Zip $Zip -EntryName $Candidate.Regular) -and
+                (Test-ZipEntry -Zip $Zip -EntryName $Candidate.SemiBold) -and
+                (Test-ZipEntry -Zip $Zip -EntryName $Candidate.Bold)) {
+                return @{
+                    Name = $Candidate.Name
+                    Archive = $Candidate.Archive
+                    Regular = $Candidate.Regular
+                    SemiBold = $Candidate.SemiBold
+                    Bold = $Candidate.Bold
+                }
+            }
+        } finally {
+            $Zip.Dispose()
+        }
+    }
+    throw "No usable application font archive found."
 }
 
 $ExeName = Get-ExeBaseName -Name $ExeName
@@ -137,24 +174,31 @@ try {
     Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     New-Item -ItemType Directory -Force -Path $FontExtractDir | Out-Null
-    $FontZip = [System.IO.Compression.ZipFile]::OpenRead($FontArchive)
+    $FontChoice = Select-AppFont -Candidates @(
+        @{ Name = "Arial"; Archive = $PrimaryFontArchive; Regular = "ARIAL.TTF"; SemiBold = "ARIALBD.TTF"; Bold = "ARIALBD.TTF" },
+        @{ Name = "Helvetica-255"; Archive = $FallbackFontArchive; Regular = "Helvetica.ttf"; SemiBold = "Helvetica-Bold.ttf"; Bold = "Helvetica-Bold.ttf" }
+    )
+    Write-Host "Using application font: $($FontChoice.Name)"
+    $FontZip = [System.IO.Compression.ZipFile]::OpenRead($FontChoice.Archive)
     try {
-        Extract-ZipEntry -Zip $FontZip -EntryName "D-DIN.otf" -OutPath $FontRegularPath
-        Extract-ZipEntry -Zip $FontZip -EntryName "D-DIN-Bold.otf" -OutPath $FontBoldPath
-        Extract-ZipEntry -Zip $FontZip -EntryName "D-DINCondensed.otf" -OutPath $FontCondensedPath
+        Extract-ZipEntry -Zip $FontZip -EntryName $FontChoice.Regular -OutPath $FontRegularPath
+        Extract-ZipEntry -Zip $FontZip -EntryName $FontChoice.SemiBold -OutPath $FontSemiBoldPath
+        Extract-ZipEntry -Zip $FontZip -EntryName $FontChoice.Bold -OutPath $FontBoldPath
     } finally {
         $FontZip.Dispose()
     }
-    $IconResourcePath = ((Resolve-Path $IconSource).Path -replace '\\', '\\')
-    $FontRegularResourcePath = ((Resolve-Path $FontRegularPath).Path -replace '\\', '\\')
-    $FontBoldResourcePath = ((Resolve-Path $FontBoldPath).Path -replace '\\', '\\')
-    $FontCondensedResourcePath = ((Resolve-Path $FontCondensedPath).Path -replace '\\', '\\')
-    Set-Content -Encoding ASCII -Path $ResourceRc -Value @"
+$IconResourcePath = ((Resolve-Path $IconSource).Path -replace '\\', '\\')
+$IconPngResourcePath = ((Resolve-Path $IconPngSource).Path -replace '\\', '\\')
+$FontRegularResourcePath = ((Resolve-Path $FontRegularPath).Path -replace '\\', '\\')
+$FontSemiBoldResourcePath = ((Resolve-Path $FontSemiBoldPath).Path -replace '\\', '\\')
+$FontBoldResourcePath = ((Resolve-Path $FontBoldPath).Path -replace '\\', '\\')
+Set-Content -Encoding ASCII -Path $ResourceRc -Value @"
 101 RCDATA "$BridgeResourcePath"
 201 ICON "$IconResourcePath"
 202 RCDATA "$FontRegularResourcePath"
-203 RCDATA "$FontBoldResourcePath"
-204 RCDATA "$FontCondensedResourcePath"
+203 RCDATA "$FontSemiBoldResourcePath"
+204 RCDATA "$FontBoldResourcePath"
+205 RCDATA "$IconPngResourcePath"
 "@
     Invoke-VsToolCommand -ToolName "rc.exe" -ToolArgs @("/nologo", "/fo", $ResourceRes, $ResourceRc)
 
@@ -171,6 +215,8 @@ try {
         "D3d11.lib",
         "Shell32.lib",
         "Dwmapi.lib",
+        "Windowscodecs.lib",
+        "Ole32.lib",
         "/link",
         "/SUBSYSTEM:WINDOWS"
     )

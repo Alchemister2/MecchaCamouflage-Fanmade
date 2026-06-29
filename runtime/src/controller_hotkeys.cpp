@@ -140,6 +140,11 @@ namespace meccha
             if ((GetKeyState(VK_LWIN) & 0x8000) || (GetKeyState(VK_RWIN) & 0x8000)) mods |= MOD_WIN;
             return mods;
         }
+
+        auto requires_modifier(UINT vk) -> bool
+        {
+            return (vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9');
+        }
     }
 
     auto parse_hotkey_binding(const std::string& text) -> HotkeyBinding
@@ -196,6 +201,11 @@ namespace meccha
         }
         out.vk = vk;
         out.modifiers = current_modifiers();
+        if (out.modifiers == 0 && requires_modifier(vk))
+        {
+            error = "Letter and number hotkeys require Ctrl, Alt, Shift, or Win.";
+            return false;
+        }
         error.clear();
         return true;
     }

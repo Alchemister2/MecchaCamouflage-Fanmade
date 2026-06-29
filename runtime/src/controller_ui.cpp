@@ -3,14 +3,17 @@
 #endif
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <d3d11.h>
+#include <wincodec.h>
 
 #include "controller_ui.hpp"
 
 #include "imgui.h"
 
 #include <algorithm>
-#include <cmath>
 #include <cctype>
+#include <cmath>
+#include <cstdint>
 #include <vector>
 
 namespace meccha
@@ -20,20 +23,124 @@ namespace meccha
         ImFont* g_heading_font = nullptr;
         ImFont* g_log_font = nullptr;
         constexpr int AppFontRegularResourceId = 202;
-        constexpr int AppFontBoldResourceId = 203;
-        constexpr int AppFontCondensedResourceId = 204;
+        constexpr int AppFontSemiBoldResourceId = 203;
+        constexpr int AppIconPngResourceId = 205;
 
-        enum class UiIcon
+        constexpr const char* RepositoryUrl = "https://github.com/acentrist/MecchaCamouflage";
+        constexpr const char* LicenseLabel = "GPL-3.0-or-later";
+
+        struct UiTexture
         {
-            Copy,
-            GitHub,
-            Record,
+            ID3D11ShaderResourceView* srv{nullptr};
+            int width{0};
+            int height{0};
         };
 
-        auto icon_button(const char* id, UiIcon icon, const char* tooltip, ImVec2 size = ImVec2(28.0f, 28.0f)) -> bool;
-        constexpr const char* RepositoryUrl = "https://github.com/acentrist/MecchaCamouflage";
-        constexpr const char* RepositoryLabel = "github.com/acentrist/MecchaCamouflage";
-        constexpr const char* LicenseLabel = "GPL-3.0-or-later";
+        UiTexture g_app_icon{};
+
+        void release_texture(UiTexture& texture)
+        {
+            if (texture.srv)
+                texture.srv->Release();
+            texture = {};
+        }
+
+        template <typename T>
+        void safe_release(T*& ptr)
+        {
+            if (ptr)
+                ptr->Release();
+            ptr = nullptr;
+        }
+
+        auto load_png_resource_texture(ID3D11Device* device, int resource_id, UiTexture& out) -> bool
+        {
+            if (!device || out.srv)
+                return out.srv != nullptr;
+
+            HMODULE module = GetModuleHandleW(nullptr);
+            HRSRC resource = FindResourceW(module, MAKEINTRESOURCEW(resource_id), MAKEINTRESOURCEW(10));
+            if (!resource)
+                return false;
+            HGLOBAL loaded = LoadResource(module, resource);
+            const DWORD resource_size = SizeofResource(module, resource);
+            void* resource_data = loaded ? LockResource(loaded) : nullptr;
+            if (!resource_data || resource_size == 0)
+                return false;
+
+            const HRESULT coinit = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            if (FAILED(coinit) && coinit != RPC_E_CHANGED_MODE)
+                return false;
+
+            IWICImagingFactory* factory = nullptr;
+            IWICStream* stream = nullptr;
+            IWICBitmapDecoder* decoder = nullptr;
+            IWICBitmapFrameDecode* frame = nullptr;
+            IWICFormatConverter* converter = nullptr;
+            ID3D11Texture2D* texture = nullptr;
+
+            bool ok = false;
+            if (SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory,
+                                           nullptr,
+                                           CLSCTX_INPROC_SERVER,
+                                           IID_PPV_ARGS(&factory))) &&
+                SUCCEEDED(factory->CreateStream(&stream)) &&
+                SUCCEEDED(stream->InitializeFromMemory(static_cast<BYTE*>(resource_data), resource_size)) &&
+                SUCCEEDED(factory->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnLoad, &decoder)) &&
+                SUCCEEDED(decoder->GetFrame(0, &frame)) &&
+                SUCCEEDED(factory->CreateFormatConverter(&converter)) &&
+                SUCCEEDED(converter->Initialize(frame,
+                                                GUID_WICPixelFormat32bppRGBA,
+                                                WICBitmapDitherTypeNone,
+                                                nullptr,
+                                                0.0,
+                                                WICBitmapPaletteTypeCustom)))
+            {
+                UINT width = 0;
+                UINT height = 0;
+                if (SUCCEEDED(converter->GetSize(&width, &height)) && width > 0 && height > 0)
+                {
+                    const UINT stride = width * 4;
+                    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(stride) * static_cast<std::size_t>(height));
+                    if (SUCCEEDED(converter->CopyPixels(nullptr, stride, static_cast<UINT>(pixels.size()), pixels.data())))
+                    {
+                        D3D11_TEXTURE2D_DESC desc{};
+                        desc.Width = width;
+                        desc.Height = height;
+                        desc.MipLevels = 1;
+                        desc.ArraySize = 1;
+                        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                        desc.SampleDesc.Count = 1;
+                        desc.Usage = D3D11_USAGE_DEFAULT;
+                        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+                        D3D11_SUBRESOURCE_DATA init{};
+                        init.pSysMem = pixels.data();
+                        init.SysMemPitch = stride;
+                        if (SUCCEEDED(device->CreateTexture2D(&desc, &init, &texture)) &&
+                            SUCCEEDED(device->CreateShaderResourceView(texture, nullptr, &out.srv)))
+                        {
+                            out.width = static_cast<int>(width);
+                            out.height = static_cast<int>(height);
+                            ok = true;
+                        }
+                    }
+                }
+            }
+
+            safe_release(texture);
+            safe_release(converter);
+            safe_release(frame);
+            safe_release(decoder);
+            safe_release(stream);
+            safe_release(factory);
+            return ok;
+        }
+
+        auto texture_ref(const UiTexture& texture) -> ImTextureRef
+        {
+            return ImTextureRef(static_cast<ImTextureID>(reinterpret_cast<intptr_t>(texture.srv)));
+        }
 
         auto tone_color(const std::string& tone) -> ImVec4
         {
@@ -41,219 +148,21 @@ namespace meccha
                 return ImVec4(0.96f, 0.28f, 0.25f, 1.0f);
             if (tone == "warning")
                 return ImVec4(0.95f, 0.72f, 0.31f, 1.0f);
-            return ImVec4(0.62f, 0.78f, 0.95f, 1.0f);
+            return ImVec4(0.18f, 0.56f, 1.0f, 1.0f);
         }
 
         auto status_color(const std::string& state) -> ImVec4
         {
             std::string lower = state;
             std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            if (lower.find("ready") != std::string::npos || lower.find("attached") != std::string::npos)
-                return ImVec4(0.48f, 0.82f, 0.54f, 1.0f);
-            if (lower.find("failed") != std::string::npos || lower.find("error") != std::string::npos)
+            if (lower.find("ready") != std::string::npos ||
+                lower.find("attached") != std::string::npos ||
+                lower.find("running") != std::string::npos)
+                return ImVec4(0.463f, 0.725f, 0.0f, 1.0f);
+            if (lower.find("failed") != std::string::npos ||
+                lower.find("error") != std::string::npos)
                 return ImVec4(0.96f, 0.28f, 0.25f, 1.0f);
-            return ImVec4(0.95f, 0.72f, 0.31f, 1.0f);
-        }
-
-        void text_row(const char* label, const std::string& value)
-        {
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
-            ImGui::TextDisabled("%s", label);
-            ImGui::TableSetColumnIndex(1);
-            ImGui::TextWrapped("%s", value.c_str());
-        }
-
-        void path_row(const char* label, const std::string& value, bool& clicked)
-        {
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
-            ImGui::TextDisabled("%s", label);
-            ImGui::TableSetColumnIndex(1);
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.66f, 0.80f, 0.94f, 1.0f));
-            ImGui::TextUnformatted(value.c_str());
-            const bool hovered = ImGui::IsItemHovered();
-            const bool item_clicked = ImGui::IsItemClicked();
-            const ImVec2 min = ImGui::GetItemRectMin();
-            const ImVec2 max = ImGui::GetItemRectMax();
-            ImGui::GetWindowDrawList()->AddLine(ImVec2(min.x, max.y), ImVec2(max.x, max.y), ImGui::GetColorU32(ImGuiCol_Text), 1.0f);
-            if (hovered)
-            {
-                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-                ImGui::SetTooltip("%s", value.c_str());
-            }
-            if (item_clicked)
-                clicked = true;
-            ImGui::PopStyleColor();
-        }
-
-        void repository_row(bool& clicked)
-        {
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
-            ImGui::TextDisabled("%s", "Repository");
-            ImGui::TableSetColumnIndex(1);
-            if (icon_button("##RepositoryLinkIcon", UiIcon::GitHub, "Open GitHub repository", ImVec2(28.0f, 28.0f)))
-                clicked = true;
-            ImGui::SameLine();
-            ImGui::AlignTextToFramePadding();
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.66f, 0.80f, 0.94f, 1.0f));
-            ImGui::TextUnformatted(RepositoryLabel);
-            const bool hovered = ImGui::IsItemHovered();
-            const bool item_clicked = ImGui::IsItemClicked();
-            const ImVec2 min = ImGui::GetItemRectMin();
-            const ImVec2 max = ImGui::GetItemRectMax();
-            ImGui::GetWindowDrawList()->AddLine(ImVec2(min.x, max.y), ImVec2(max.x, max.y), ImGui::GetColorU32(ImGuiCol_Text), 1.0f);
-            if (hovered)
-            {
-                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-                ImGui::SetTooltip("%s", RepositoryUrl);
-            }
-            if (item_clicked)
-                clicked = true;
-            ImGui::PopStyleColor();
-        }
-
-        void status_row(const char* label, const std::string& value)
-        {
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
-            ImGui::TextDisabled("%s", label);
-            ImGui::TableSetColumnIndex(1);
-            ImGui::PushStyleColor(ImGuiCol_Text, status_color(value));
-            ImGui::TextWrapped("%s", value.c_str());
-            ImGui::PopStyleColor();
-        }
-
-        void section_header(const char* text)
-        {
-            ImGui::Dummy(ImVec2(0.0f, 2.0f));
-            ImGui::AlignTextToFramePadding();
-            if (g_heading_font)
-                ImGui::PushFont(g_heading_font);
-            ImGui::TextUnformatted(text);
-            if (g_heading_font)
-                ImGui::PopFont();
-        }
-
-        auto checkbox_control_width(const char* label) -> float
-        {
-            const ImGuiStyle& style = ImGui::GetStyle();
-            return ImGui::GetFrameHeight() + style.ItemInnerSpacing.x + ImGui::CalcTextSize(label).x;
-        }
-
-        void same_line_right(float width)
-        {
-            const ImGuiStyle& style = ImGui::GetStyle();
-            const float target_x = ImGui::GetContentRegionMax().x - width;
-            ImGui::SameLine(std::max(ImGui::GetCursorPosX() + style.ItemSpacing.x, target_x));
-        }
-
-        auto icon_button(const char* id, UiIcon icon, const char* tooltip, ImVec2 size) -> bool
-        {
-            const bool pressed = ImGui::Button(id, size);
-            const ImVec2 min = ImGui::GetItemRectMin();
-            const ImVec2 max = ImGui::GetItemRectMax();
-            const ImVec2 center((min.x + max.x) * 0.5f, (min.y + max.y) * 0.5f);
-            ImDrawList* draw = ImGui::GetWindowDrawList();
-            const ImU32 color = ImGui::GetColorU32(ImGuiCol_Text);
-            const float scale = std::min(size.x, size.y) / 28.0f;
-            if (icon == UiIcon::Copy)
-            {
-                const ImVec2 a(center.x - 6.0f * scale, center.y - 4.0f * scale);
-                const ImVec2 b(center.x + 4.0f * scale, center.y + 6.0f * scale);
-                draw->AddRect(a, b, color, 1.5f * scale, 0, 1.5f * scale);
-                draw->AddRect(ImVec2(a.x + 4.0f * scale, a.y - 4.0f * scale),
-                              ImVec2(b.x + 4.0f * scale, b.y - 4.0f * scale),
-                              color,
-                              1.5f * scale,
-                              0,
-                              1.5f * scale);
-            }
-            else if (icon == UiIcon::GitHub)
-            {
-                draw->AddCircle(center, 7.5f * scale, color, 24, 1.6f * scale);
-                draw->AddCircleFilled(ImVec2(center.x - 3.0f * scale, center.y - 1.0f * scale), 1.0f * scale, color, 12);
-                draw->AddCircleFilled(ImVec2(center.x + 3.0f * scale, center.y - 1.0f * scale), 1.0f * scale, color, 12);
-                draw->AddLine(ImVec2(center.x - 3.5f * scale, center.y + 3.0f * scale),
-                              ImVec2(center.x + 3.5f * scale, center.y + 3.0f * scale),
-                              color,
-                              1.5f * scale);
-                draw->AddLine(ImVec2(center.x - 4.0f * scale, center.y - 6.5f * scale),
-                              ImVec2(center.x - 1.5f * scale, center.y - 8.5f * scale),
-                              color,
-                              1.3f * scale);
-                draw->AddLine(ImVec2(center.x + 4.0f * scale, center.y - 6.5f * scale),
-                              ImVec2(center.x + 1.5f * scale, center.y - 8.5f * scale),
-                              color,
-                              1.3f * scale);
-            }
-            else
-            {
-                draw->AddCircle(center, 6.0f * scale, color, 24, 1.8f * scale);
-                draw->AddCircleFilled(center, 2.4f * scale, color, 16);
-            }
-            if (ImGui::IsItemHovered() && tooltip && *tooltip)
-                ImGui::SetTooltip("%s", tooltip);
-            return pressed;
-        }
-
-        void align_to_bottom_right(float width)
-        {
-            const float button_height = ImGui::GetFrameHeight();
-            const float bottom_y = ImGui::GetWindowContentRegionMax().y - button_height;
-            const float right_x = ImGui::GetWindowContentRegionMax().x - width;
-            ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY(), bottom_y));
-            ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), right_x));
-        }
-
-        void settings_action_row(bool editing, bool& edit, bool& save, bool& cancel, bool& reset)
-        {
-            const float spacing = ImGui::GetStyle().ItemSpacing.x;
-            const float width = 86.0f;
-            const float total_width = editing ? width * 3.0f + spacing * 2.0f : width;
-            align_to_bottom_right(total_width);
-            if (!editing)
-            {
-                if (ImGui::Button("Edit", ImVec2(width, 0.0f)))
-                    edit = true;
-                return;
-            }
-            if (ImGui::Button("Save", ImVec2(width, 0.0f)))
-                save = true;
-            ImGui::SameLine();
-            if (ImGui::Button("Cancel", ImVec2(width, 0.0f)))
-                cancel = true;
-            ImGui::SameLine();
-            if (ImGui::Button("Reset", ImVec2(width, 0.0f)))
-                reset = true;
-        }
-
-        auto begin_section(const char* id, const char* title, const ImVec2& size = ImVec2(0.0f, 0.0f)) -> bool
-        {
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.035f, 0.035f, 0.038f, 1.0f));
-            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0f);
-            ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
-            const bool open = ImGui::BeginChild(id, size, true);
-            if (open)
-                section_header(title);
-            return open;
-        }
-
-        void end_section()
-        {
-            ImGui::EndChild();
-            ImGui::PopStyleVar(2);
-            ImGui::PopStyleColor();
-        }
-
-        auto begin_form_table(const char* id, float label_width = 148.0f) -> bool
-        {
-            if (!ImGui::BeginTable(id, 2, ImGuiTableFlags_SizingStretchProp))
-                return false;
-            ImGui::TableSetupColumn("Setting", ImGuiTableColumnFlags_WidthFixed, label_width);
-            ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
-            return true;
+            return ImVec4(0.95f, 0.72f, 0.25f, 1.0f);
         }
 
         auto stable_id(const char* prefix, const char* label) -> std::string
@@ -261,120 +170,19 @@ namespace meccha
             return std::string("##") + prefix + label;
         }
 
-        void input_double_setting(const char* label, double& value, double min_value, double max_value, const char* format, bool& changed)
+        auto log_tag_color(const std::string& line) -> ImVec4
         {
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
-            ImGui::TextUnformatted(label);
-            ImGui::TableSetColumnIndex(1);
-            const float input_width = 98.0f;
-            const float spacing = ImGui::GetStyle().ItemSpacing.x;
-            float slider_value = static_cast<float>(value);
-            const double before = value;
-            ImGui::SetNextItemWidth(std::max(120.0f, ImGui::GetContentRegionAvail().x - input_width - spacing));
-            if (ImGui::SliderFloat(stable_id("Slider", label).c_str(),
-                                   &slider_value,
-                                   static_cast<float>(min_value),
-                                   static_cast<float>(max_value),
-                                   format,
-                                   ImGuiSliderFlags_AlwaysClamp))
-            {
-                value = static_cast<double>(slider_value);
-                changed = true;
-            }
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(input_width);
-            if (ImGui::InputDouble(stable_id("Input", label).c_str(), &value, 0.0, 0.0, format, ImGuiInputTextFlags_EnterReturnsTrue))
-                changed = true;
-            if (ImGui::IsItemDeactivatedAfterEdit())
-            {
-                value = std::min(max_value, std::max(min_value, value));
-                changed = changed || before != value;
-            }
-        }
-
-        void input_int_setting(const char* label, int& value, int min_value, int max_value, bool& changed)
-        {
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
-            ImGui::TextUnformatted(label);
-            ImGui::TableSetColumnIndex(1);
-            const float input_width = 98.0f;
-            const float spacing = ImGui::GetStyle().ItemSpacing.x;
-            const int before = value;
-            int slider_value = value;
-            ImGui::SetNextItemWidth(std::max(120.0f, ImGui::GetContentRegionAvail().x - input_width - spacing));
-            if (ImGui::SliderInt(stable_id("Slider", label).c_str(), &slider_value, min_value, max_value, "%d", ImGuiSliderFlags_AlwaysClamp))
-            {
-                value = slider_value;
-                changed = true;
-            }
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(input_width);
-            if (ImGui::InputInt(stable_id("Input", label).c_str(), &value, 0, 0, ImGuiInputTextFlags_EnterReturnsTrue))
-                changed = true;
-            if (ImGui::IsItemDeactivatedAfterEdit())
-            {
-                value = std::min(max_value, std::max(min_value, value));
-                changed = changed || before != value;
-            }
-        }
-
-        void input_opacity_setting(float& opacity, bool& changed)
-        {
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
-            ImGui::TextUnformatted("Opacity");
-            ImGui::TableSetColumnIndex(1);
-            int opacity_percent = static_cast<int>(opacity * 100.0f + 0.5f);
-            bool opacity_changed = false;
-            const float input_width = 98.0f;
-            const float spacing = ImGui::GetStyle().ItemSpacing.x;
-            ImGui::SetNextItemWidth(std::max(120.0f, ImGui::GetContentRegionAvail().x - input_width - spacing));
-            if (ImGui::SliderInt("##OpacitySlider", &opacity_percent, 35, 100, "%d%%", ImGuiSliderFlags_AlwaysClamp))
-                opacity_changed = true;
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(input_width);
-            if (ImGui::InputInt("##OpacityInput", &opacity_percent, 0, 0, ImGuiInputTextFlags_EnterReturnsTrue))
-                opacity_changed = true;
-            if (ImGui::IsItemDeactivatedAfterEdit())
-                opacity_changed = true;
-            if (opacity_changed)
-            {
-                opacity_percent = std::min(100, std::max(35, opacity_percent));
-                opacity = static_cast<float>(opacity_percent) / 100.0f;
-                changed = true;
-            }
-        }
-
-        struct LogCallbackState
-        {
-            bool scroll_to_end{false};
-        };
-
-        auto log_line_color(const std::string& line) -> ImVec4
-        {
-            if (line.find(" ERROR ") != std::string::npos)
+            if (line.find("[ERROR]") != std::string::npos)
                 return tone_color("error");
-            if (line.find(" WARN ") != std::string::npos)
+            if (line.find("[WARN]") != std::string::npos)
                 return tone_color("warning");
             return tone_color("info");
         }
 
-        auto log_text_callback(ImGuiInputTextCallbackData* data) -> int
+        auto log_line_background(const std::string& line) -> ImVec4
         {
-            auto* state = static_cast<LogCallbackState*>(data->UserData);
-            if (state && state->scroll_to_end)
-            {
-                const bool has_selection = data->SelectionStart != data->SelectionEnd;
-                if (!has_selection)
-                {
-                    data->CursorPos = data->BufTextLen;
-                    data->SelectionStart = data->BufTextLen;
-                    data->SelectionEnd = data->BufTextLen;
-                }
-            }
-            return 0;
+            (void)line;
+            return ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
         }
 
         void draw_colored_log_box(const char* id, const std::string& text, const ImVec2& size, std::size_t& previous_size)
@@ -394,9 +202,34 @@ namespace meccha
                     const std::string line = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
                     if (!line.empty())
                     {
-                        ImGui::PushStyleColor(ImGuiCol_Text, log_line_color(line));
-                        ImGui::TextWrapped("%s", line.c_str());
-                        ImGui::PopStyleColor();
+                        const ImVec2 row_pos = ImGui::GetCursorScreenPos();
+                        const float row_width = ImGui::GetContentRegionAvail().x;
+                        const ImVec4 row_bg = log_line_background(line);
+                        if (row_bg.w > 0.0f)
+                        {
+                            ImGui::GetWindowDrawList()->AddRectFilled(row_pos,
+                                                                      ImVec2(row_pos.x + row_width, row_pos.y + ImGui::GetTextLineHeightWithSpacing()),
+                                                                      ImGui::GetColorU32(row_bg));
+                        }
+                        const std::size_t tag_start = line.find('[');
+                        const std::size_t tag_end = line.find(']', tag_start == std::string::npos ? 0 : tag_start);
+                        if (tag_start != std::string::npos && tag_end != std::string::npos)
+                        {
+                            const std::string before = line.substr(0, tag_start);
+                            const std::string tag = line.substr(tag_start, tag_end - tag_start + 1);
+                            const std::string after = line.substr(tag_end + 1);
+                            ImGui::TextUnformatted(before.c_str());
+                            ImGui::SameLine(0.0f, 0.0f);
+                            ImGui::PushStyleColor(ImGuiCol_Text, log_tag_color(line));
+                            ImGui::TextUnformatted(tag.c_str());
+                            ImGui::PopStyleColor();
+                            ImGui::SameLine(0.0f, 4.0f);
+                            ImGui::TextWrapped("%s", after.c_str());
+                        }
+                        else
+                        {
+                            ImGui::TextWrapped("%s", line.c_str());
+                        }
                         wrote_line = true;
                     }
                     if (end == std::string::npos)
@@ -414,30 +247,6 @@ namespace meccha
             }
             ImGui::EndChild();
             ImGui::PopStyleColor();
-            if (g_log_font)
-                ImGui::PopFont();
-        }
-
-        void draw_log_box(const char* id, const std::string& text, const ImVec2& size, std::size_t& previous_size)
-        {
-            std::vector<char> buffer(text.begin(), text.end());
-            buffer.push_back('\0');
-            LogCallbackState callback_state{};
-            callback_state.scroll_to_end = text.size() != previous_size;
-            previous_size = text.size();
-            if (g_log_font)
-                ImGui::PushFont(g_log_font);
-            ImGui::InputTextMultiline(id,
-                                      buffer.data(),
-                                      buffer.size(),
-                                      size,
-                                      ImGuiInputTextFlags_ReadOnly |
-                                          ImGuiInputTextFlags_NoUndoRedo |
-                                          ImGuiInputTextFlags_NoHorizontalScroll |
-                                          ImGuiInputTextFlags_WordWrap |
-                                          ImGuiInputTextFlags_CallbackAlways,
-                                      log_text_callback,
-                                      &callback_state);
             if (g_log_font)
                 ImGui::PopFont();
         }
@@ -466,39 +275,40 @@ namespace meccha
         ImGui::StyleColorsDark();
         ImGuiStyle& style = ImGui::GetStyle();
         style.WindowRounding = 0.0f;
-        style.ChildRounding = 8.0f;
-        style.FrameRounding = 5.0f;
-        style.PopupRounding = 8.0f;
+        style.ChildRounding = 2.0f;
+        style.FrameRounding = 2.0f;
+        style.PopupRounding = 2.0f;
         style.ScrollbarRounding = 6.0f;
-        style.GrabRounding = 6.0f;
+        style.GrabRounding = 2.0f;
         style.WindowPadding = ImVec2(12.0f, 10.0f);
-        style.FramePadding = ImVec2(9.0f, 6.0f);
-        style.ItemSpacing = ImVec2(9.0f, 7.0f);
+        style.FramePadding = ImVec2(8.0f, 5.0f);
+        style.ItemSpacing = ImVec2(8.0f, 6.0f);
         style.ItemInnerSpacing = ImVec2(7.0f, 5.0f);
         style.IndentSpacing = 16.0f;
         style.ScrollbarSize = 15.0f;
+        style.FrameBorderSize = 1.0f;
 
         ImVec4* colors = style.Colors;
         colors[ImGuiCol_Text] = ImVec4(0.94f, 0.95f, 0.96f, 1.0f);
-        colors[ImGuiCol_TextDisabled] = ImVec4(0.70f, 0.72f, 0.74f, 1.0f);
-        colors[ImGuiCol_WindowBg] = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
-        colors[ImGuiCol_ChildBg] = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
-        colors[ImGuiCol_Border] = ImVec4(0.145f, 0.145f, 0.150f, 1.0f);
-        colors[ImGuiCol_FrameBg] = ImVec4(0.055f, 0.055f, 0.060f, 1.0f);
-        colors[ImGuiCol_FrameBgHovered] = ImVec4(0.090f, 0.092f, 0.100f, 1.0f);
-        colors[ImGuiCol_FrameBgActive] = ImVec4(0.120f, 0.125f, 0.135f, 1.0f);
-        colors[ImGuiCol_Button] = ImVec4(0.090f, 0.092f, 0.100f, 1.0f);
-        colors[ImGuiCol_ButtonHovered] = ImVec4(0.145f, 0.150f, 0.165f, 1.0f);
-        colors[ImGuiCol_ButtonActive] = ImVec4(0.190f, 0.200f, 0.220f, 1.0f);
-        colors[ImGuiCol_Header] = ImVec4(0.075f, 0.078f, 0.085f, 1.0f);
-        colors[ImGuiCol_HeaderHovered] = ImVec4(0.120f, 0.125f, 0.140f, 1.0f);
-        colors[ImGuiCol_HeaderActive] = ImVec4(0.160f, 0.170f, 0.190f, 1.0f);
-        colors[ImGuiCol_CheckMark] = ImVec4(0.88f, 0.92f, 0.98f, 1.0f);
-        colors[ImGuiCol_SliderGrab] = ImVec4(0.78f, 0.84f, 0.94f, 1.0f);
-        colors[ImGuiCol_SliderGrabActive] = ImVec4(0.94f, 0.96f, 1.0f, 1.0f);
-        colors[ImGuiCol_Separator] = ImVec4(0.145f, 0.145f, 0.150f, 1.0f);
-        colors[ImGuiCol_SeparatorHovered] = ImVec4(0.300f, 0.310f, 0.330f, 1.0f);
-        colors[ImGuiCol_SeparatorActive] = ImVec4(0.520f, 0.540f, 0.570f, 1.0f);
+        colors[ImGuiCol_TextDisabled] = ImVec4(0.62f, 0.64f, 0.62f, 1.0f);
+        colors[ImGuiCol_WindowBg] = ImVec4(0.075f, 0.075f, 0.075f, 1.0f);
+        colors[ImGuiCol_ChildBg] = ImVec4(0.075f, 0.075f, 0.075f, 1.0f);
+        colors[ImGuiCol_Border] = ImVec4(0.37f, 0.37f, 0.37f, 1.0f);
+        colors[ImGuiCol_FrameBg] = ImVec4(0.035f, 0.035f, 0.035f, 1.0f);
+        colors[ImGuiCol_FrameBgHovered] = ImVec4(0.090f, 0.100f, 0.080f, 1.0f);
+        colors[ImGuiCol_FrameBgActive] = ImVec4(0.115f, 0.140f, 0.090f, 1.0f);
+        colors[ImGuiCol_Button] = ImVec4(0.075f, 0.075f, 0.075f, 1.0f);
+        colors[ImGuiCol_ButtonHovered] = ImVec4(0.150f, 0.190f, 0.095f, 1.0f);
+        colors[ImGuiCol_ButtonActive] = ImVec4(0.463f, 0.725f, 0.0f, 1.0f);
+        colors[ImGuiCol_Header] = ImVec4(0.075f, 0.075f, 0.075f, 1.0f);
+        colors[ImGuiCol_HeaderHovered] = ImVec4(0.150f, 0.190f, 0.095f, 1.0f);
+        colors[ImGuiCol_HeaderActive] = ImVec4(0.463f, 0.725f, 0.0f, 1.0f);
+        colors[ImGuiCol_CheckMark] = ImVec4(0.463f, 0.725f, 0.0f, 1.0f);
+        colors[ImGuiCol_SliderGrab] = ImVec4(0.463f, 0.725f, 0.0f, 1.0f);
+        colors[ImGuiCol_SliderGrabActive] = ImVec4(0.58f, 0.86f, 0.12f, 1.0f);
+        colors[ImGuiCol_Separator] = ImVec4(0.34f, 0.34f, 0.34f, 1.0f);
+        colors[ImGuiCol_SeparatorHovered] = ImVec4(0.463f, 0.725f, 0.0f, 1.0f);
+        colors[ImGuiCol_SeparatorActive] = ImVec4(0.58f, 0.86f, 0.12f, 1.0f);
         colors[ImGuiCol_ScrollbarBg] = ImVec4(0.020f, 0.020f, 0.022f, 1.0f);
         colors[ImGuiCol_ScrollbarGrab] = ImVec4(0.170f, 0.175f, 0.185f, 1.0f);
         colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.250f, 0.260f, 0.275f, 1.0f);
@@ -512,8 +322,8 @@ namespace meccha
         if (embedded_ui)
         {
             io.FontDefault = embedded_ui;
-            g_heading_font = add_embedded_font(AppFontBoldResourceId, 18.0f);
-            g_log_font = add_embedded_font(AppFontCondensedResourceId, 15.5f);
+            g_heading_font = add_embedded_font(AppFontSemiBoldResourceId, 18.0f);
+            g_log_font = add_embedded_font(AppFontRegularResourceId, 15.5f);
             if (!g_heading_font)
                 g_heading_font = embedded_ui;
             if (!g_log_font)
@@ -521,8 +331,9 @@ namespace meccha
             return;
         }
         const char* ui_fonts[] = {
+            "C:\\Windows\\Fonts\\arial.ttf",
+            "C:\\Windows\\Fonts\\Arial.ttf",
             "C:\\Windows\\Fonts\\segoeui.ttf",
-            "C:\\Windows\\Fonts\\SegoeUI.ttf",
         };
         for (const char* path : ui_fonts)
         {
@@ -534,11 +345,12 @@ namespace meccha
                 break;
             }
         }
-        const char* mono_fonts[] = {
-            "C:\\Windows\\Fonts\\consola.ttf",
-            "C:\\Windows\\Fonts\\Consola.ttf",
+        const char* log_fonts[] = {
+            "C:\\Windows\\Fonts\\arial.ttf",
+            "C:\\Windows\\Fonts\\Arial.ttf",
+            "C:\\Windows\\Fonts\\segoeui.ttf",
         };
-        for (const char* path : mono_fonts)
+        for (const char* path : log_fonts)
         {
             g_log_font = io.Fonts->AddFontFromFileTTF(path, 15.5f);
             if (g_log_font)
@@ -546,11 +358,20 @@ namespace meccha
         }
     }
 
+    void initialize_meccha_ui_resources(ID3D11Device* device)
+    {
+        load_png_resource_texture(device, AppIconPngResourceId, g_app_icon);
+    }
+
+    void shutdown_meccha_ui_resources()
+    {
+        release_texture(g_app_icon);
+    }
+
     void draw_app_ui(AppSettings& draft,
                      const AppSettings& persisted,
                      const UiRuntimeState& runtime,
                      const std::string& human_log_text,
-                     const std::string& trace_log_text,
                      UiActions& actions)
     {
         ImGuiIO& io = ImGui::GetIO();
@@ -560,242 +381,686 @@ namespace meccha
                                        ImGuiWindowFlags_NoMove |
                                        ImGuiWindowFlags_NoResize |
                                        ImGuiWindowFlags_NoSavedSettings;
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
         if (!ImGui::Begin("MecchaCamouflageDesktop", nullptr, flags))
         {
+            ImGui::PopStyleVar();
             ImGui::End();
             return;
         }
+        ImGui::PopStyleVar();
 
         const ImGuiStyle& style = ImGui::GetStyle();
-        const float content_height = std::max(1.0f, ImGui::GetContentRegionAvail().y);
-        const float total_width = ImGui::GetContentRegionAvail().x;
-        const float pane_gap = style.ItemSpacing.x;
-        const float left_width = std::max(1.0f, (total_width - pane_gap) * 0.5f);
-        const float left_available_height = std::max(1.0f, content_height - style.ItemSpacing.y * 2.0f);
-        const float info_block_height = std::max(250.0f, left_available_height * 0.30f);
-        const float app_block_height = std::max(270.0f, left_available_height * 0.33f);
-        const float paint_block_height = std::max(1.0f, left_available_height - info_block_height - app_block_height);
+        constexpr ImVec4 Primary = ImVec4(0.463f, 0.725f, 0.0f, 1.0f);
+        constexpr ImVec4 PrimaryText = ImVec4(0.02f, 0.02f, 0.02f, 1.0f);
+        constexpr ImVec4 Surface = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
+        constexpr ImVec4 SurfaceLow = ImVec4(0.105f, 0.105f, 0.105f, 1.0f);
+        constexpr ImVec4 Hairline = ImVec4(0.37f, 0.37f, 0.37f, 1.0f);
+        constexpr ImVec4 Muted = ImVec4(0.64f, 0.64f, 0.64f, 1.0f);
 
-        if (ImGui::BeginChild("InfoPane", ImVec2(left_width, content_height), false))
-        {
-            if (begin_section("InfoBlock", "Info", ImVec2(0.0f, info_block_height)))
+        auto draw_corner_accent = [&](bool bottom_right = false) {
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            const ImVec2 pos = ImGui::GetWindowPos();
+            const ImVec2 size = ImGui::GetWindowSize();
+            const float len = 16.0f;
+            const ImU32 color = ImGui::GetColorU32(Primary);
+            draw->AddLine(pos, ImVec2(pos.x + len, pos.y), color, 3.0f);
+            draw->AddLine(pos, ImVec2(pos.x, pos.y + len), color, 3.0f);
+            if (bottom_right)
             {
-                ImGui::Spacing();
-                if (ImGui::BeginTable("InfoTable", 2, ImGuiTableFlags_SizingStretchProp))
-                {
-                    ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthFixed, 148.0f);
-                    ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
-                    text_row("Target", runtime.target_process);
-                    text_row("Process", runtime.process_name.empty() ? "-" : runtime.process_name);
-                    text_row("PID", std::to_string(runtime.pid));
-                    status_row("Bridge", runtime.bridge_ready ? "Ready" : runtime.bridge_state);
-                    text_row("Paint route", runtime.paint_route.empty() ? "-" : runtime.paint_route);
-                    text_row("Regions", runtime.paint_regions.empty() ? "-" : runtime.paint_regions);
-                    text_row("Mesh", runtime.mesh_status.empty() ? "-" : runtime.mesh_status);
-                    text_row("Planner", runtime.planner_status.empty() ? "-" : runtime.planner_status);
-                    text_row("Replay", runtime.replay_status.empty() ? "-" : runtime.replay_status);
-                    text_row("License", LicenseLabel);
-                    repository_row(actions.open_repository_clicked);
-                    path_row("Log dir", runtime.log_dir, actions.open_logs_clicked);
-                    ImGui::EndTable();
-                }
+                const ImVec2 br(pos.x + size.x - 1.0f, pos.y + size.y - 1.0f);
+                draw->AddLine(br, ImVec2(br.x - len, br.y), color, 3.0f);
+                draw->AddLine(br, ImVec2(br.x, br.y - len), color, 3.0f);
             }
-            end_section();
+        };
 
-            if (begin_section("AppSettingsBlock", "App Settings", ImVec2(0.0f, app_block_height)))
+        auto begin_panel = [&](const char* id, const ImVec2& size, bool accent = true, bool bottom_right = false, ImVec2 padding = ImVec2(8.0f, 8.0f)) -> bool {
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, Surface);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, padding);
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 2.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
+            const bool open = ImGui::BeginChild(id, size, true);
+            if (open && accent)
+                draw_corner_accent(bottom_right);
+            return open;
+        };
+
+        auto end_panel = [&]() {
+            ImGui::EndChild();
+            ImGui::PopStyleVar(3);
+            ImGui::PopStyleColor();
+        };
+
+        auto section_header = [&](const char* title, bool accent = false) {
+            const ImVec2 pos = ImGui::GetCursorScreenPos();
+            const float width = ImGui::GetContentRegionAvail().x;
+            const float height = 31.0f;
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            draw->AddRectFilled(pos, ImVec2(pos.x + width, pos.y + height), ImGui::GetColorU32(SurfaceLow), 0.0f);
+            draw->AddLine(ImVec2(pos.x, pos.y + height), ImVec2(pos.x + width, pos.y + height), ImGui::GetColorU32(Hairline), 1.0f);
+            if (accent)
             {
-                ImGui::Spacing();
-                if (begin_form_table("AppSettingsTable"))
+                const ImU32 color = ImGui::GetColorU32(Primary);
+                draw->AddLine(pos, ImVec2(pos.x + 16.0f, pos.y), color, 3.0f);
+                draw->AddLine(pos, ImVec2(pos.x, pos.y + 16.0f), color, 3.0f);
+            }
+            ImGui::SetCursorScreenPos(ImVec2(pos.x + 8.0f, pos.y + 8.0f));
+            if (g_heading_font)
+                ImGui::PushFont(g_heading_font);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.92f, 0.94f, 0.92f, 1.0f));
+            ImGui::TextUnformatted(title);
+            ImGui::PopStyleColor();
+            if (g_heading_font)
+                ImGui::PopFont();
+            ImGui::SetCursorScreenPos(ImVec2(pos.x + 12.0f, pos.y + height + 9.0f));
+        };
+
+        auto action_button = [&](const char* label, bool enabled, bool primary, const ImVec2& size) -> bool {
+            if (!enabled)
+            {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.055f, 0.060f, 0.050f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.055f, 0.060f, 0.050f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.055f, 0.060f, 0.050f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.34f, 0.38f, 0.32f, 1.0f));
+            }
+            else if (primary)
+            {
+                ImGui::PushStyleColor(ImGuiCol_Button, Primary);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.58f, 0.86f, 0.12f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.64f, 0.92f, 0.18f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, PrimaryText);
+            }
+            ImGui::BeginDisabled(!enabled);
+            const bool pressed = ImGui::Button(label, size);
+            ImGui::EndDisabled();
+            if (!enabled || primary)
+                ImGui::PopStyleColor(4);
+            return pressed;
+        };
+
+        auto custom_checkbox = [&](const char* label, bool& value, bool enabled = true) -> bool {
+            ImGui::PushID(label);
+            const ImVec2 start = ImGui::GetCursorScreenPos();
+            const float box = 15.0f;
+            const float row_height = 24.0f;
+            const ImVec2 label_size = ImGui::CalcTextSize(label);
+            const ImVec2 total_size(box + 7.0f + label_size.x, row_height);
+            const bool pressed = ImGui::InvisibleButton("##checkbox", total_size);
+            if (pressed && enabled)
+                value = !value;
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            const ImU32 border = ImGui::GetColorU32((enabled || value) ? Primary : Muted);
+            const ImVec2 box_min(start.x, start.y + (row_height - box) * 0.5f);
+            draw->AddRectFilled(box_min, ImVec2(box_min.x + box, box_min.y + box), IM_COL32(10, 10, 10, 255), 1.0f);
+            draw->AddRect(box_min, ImVec2(box_min.x + box, box_min.y + box), border, 1.0f, 0, 1.6f);
+            if (value)
+            {
+                draw->AddRectFilled(ImVec2(box_min.x + 4.0f, box_min.y + 4.0f),
+                                    ImVec2(box_min.x + box - 4.0f, box_min.y + box - 4.0f),
+                                    ImGui::GetColorU32(Primary),
+                                    1.0f);
+            }
+            const ImVec2 text_pos(start.x + box + 7.0f, start.y + (row_height - label_size.y) * 0.5f - 1.0f);
+            draw->AddText(text_pos, ImGui::GetColorU32(enabled ? ImGuiCol_Text : ImGuiCol_TextDisabled), label);
+            ImGui::PopID();
+            return pressed && enabled;
+        };
+
+        auto checkbox_box = [&](const char* id, bool& value, bool enabled = true) -> bool {
+            ImGui::PushID(id);
+            const ImVec2 start = ImGui::GetCursorScreenPos();
+            const float box = 15.0f;
+            const bool pressed = ImGui::InvisibleButton("##checkbox_box", ImVec2(box, box));
+            if (pressed && enabled)
+                value = !value;
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            const ImU32 border = ImGui::GetColorU32((enabled || value) ? Primary : Muted);
+            draw->AddRectFilled(start, ImVec2(start.x + box, start.y + box), IM_COL32(10, 10, 10, 255), 1.0f);
+            draw->AddRect(start, ImVec2(start.x + box, start.y + box), border, 1.0f, 0, 1.6f);
+            if (value)
+            {
+                draw->AddRectFilled(ImVec2(start.x + 4.0f, start.y + 4.0f),
+                                    ImVec2(start.x + box - 4.0f, start.y + box - 4.0f),
+                                    ImGui::GetColorU32(Primary),
+                                    1.0f);
+            }
+            ImGui::PopID();
+            return pressed && enabled;
+        };
+
+        constexpr float FormPaddingX = 18.0f;
+        constexpr float FormRightPaddingX = 18.0f;
+        constexpr float AppLabelWidth = 118.0f;
+        auto set_form_x = [&]() {
+            ImGui::SetCursorPosX(FormPaddingX);
+        };
+        auto form_width = [&]() -> float {
+            return std::max(1.0f, ImGui::GetWindowContentRegionMax().x - FormPaddingX - FormRightPaddingX);
+        };
+        auto app_control_x = [&]() -> float {
+            return FormPaddingX + AppLabelWidth;
+        };
+        auto app_control_width = [&]() -> float {
+            return std::max(1.0f, ImGui::GetWindowContentRegionMax().x - app_control_x() - FormRightPaddingX);
+        };
+        auto app_label = [&](const char* label) {
+            set_form_x();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextDisabled("%s", label);
+        };
+        auto app_row = [&](const char* label) -> float {
+            const float row_top = ImGui::GetCursorScreenPos().y;
+            set_form_x();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextDisabled("%s", label);
+            ImGui::SameLine(app_control_x());
+            ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x, row_top));
+            return row_top;
+        };
+
+        auto readonly_value_box = [&](const char* id, const char* text, const ImVec2& size) {
+            ImGui::PushID(id);
+            const ImVec2 min = ImGui::GetCursorScreenPos();
+            const ImVec2 max(min.x + size.x, min.y + size.y);
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            draw->AddRectFilled(min, max, ImGui::GetColorU32(SurfaceLow), 1.0f);
+            draw->AddRect(min, max, ImGui::GetColorU32(Hairline), 1.0f, 0, 1.0f);
+            const float text_y = min.y + std::max(0.0f, (size.y - ImGui::GetTextLineHeight()) * 0.5f);
+            draw->AddText(ImVec2(min.x + 8.0f, text_y), ImGui::GetColorU32(ImGuiCol_Text), text);
+            ImGui::Dummy(size);
+            ImGui::PopID();
+        };
+
+        auto draw_app_mark = [&](const ImVec2& min, const ImVec2& max) {
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            if (g_app_icon.srv)
+            {
+                draw->AddImage(texture_ref(g_app_icon), min, max);
+                return;
+            }
+            draw->AddRectFilled(min, max, ImGui::GetColorU32(Primary), 3.0f);
+            draw->AddRectFilled(ImVec2(min.x + 6.0f, min.y + 5.0f),
+                                ImVec2(max.x - 6.0f, max.y - 5.0f),
+                                IM_COL32(6, 8, 4, 255),
+                                1.0f);
+        };
+
+        auto draw_folder_icon = [&](const ImVec2& min, ImU32 color) {
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            const float x = min.x;
+            const float y = min.y;
+            draw->AddLine(ImVec2(x, y + 4.0f), ImVec2(x + 5.0f, y + 4.0f), color, 1.4f);
+            draw->AddLine(ImVec2(x + 5.0f, y + 4.0f), ImVec2(x + 7.0f, y + 7.0f), color, 1.4f);
+            draw->AddLine(ImVec2(x + 7.0f, y + 7.0f), ImVec2(x + 17.0f, y + 7.0f), color, 1.4f);
+            draw->AddRect(ImVec2(x, y + 6.0f), ImVec2(x + 18.0f, y + 15.0f), color, 1.0f, 0, 1.4f);
+        };
+
+        auto draw_copy_icon = [&](const ImVec2& min, ImU32 color) {
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            draw->AddRect(ImVec2(min.x + 5.0f, min.y + 4.0f), ImVec2(min.x + 14.0f, min.y + 15.0f), color, 1.0f, 0, 1.2f);
+            draw->AddRect(ImVec2(min.x + 2.0f, min.y + 1.0f), ImVec2(min.x + 11.0f, min.y + 12.0f), color, 1.0f, 0, 1.2f);
+        };
+
+        auto field_double = [&](const char* label, double& value, double min_value, double max_value, const char* format, bool enabled, bool& changed) {
+            ImGui::PushID(label);
+            set_form_x();
+            ImGui::TextDisabled("%s", label);
+            ImGui::BeginDisabled(!enabled);
+            const double before = value;
+            float slider_value = static_cast<float>(value);
+            const float input_width = 82.0f;
+            const float control_width = form_width();
+            const float slider_width = std::max(1.0f, control_width - input_width - ImGui::GetStyle().ItemSpacing.x);
+            set_form_x();
+            ImGui::SetNextItemWidth(slider_width);
+            if (ImGui::SliderFloat("##slider", &slider_value, static_cast<float>(min_value), static_cast<float>(max_value), format, ImGuiSliderFlags_AlwaysClamp))
+            {
+                value = static_cast<double>(slider_value);
+                changed = true;
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(input_width);
+            if (ImGui::InputDouble("##input", &value, 0.0, 0.0, format, ImGuiInputTextFlags_EnterReturnsTrue))
+                changed = true;
+            if (ImGui::IsItemDeactivatedAfterEdit())
+            {
+                value = std::min(max_value, std::max(min_value, value));
+                changed = changed || before != value;
+            }
+            ImGui::EndDisabled();
+            ImGui::PopID();
+        };
+
+        auto field_int = [&](const char* label, int& value, int min_value, int max_value, bool enabled, bool& changed) {
+            ImGui::PushID(label);
+            set_form_x();
+            ImGui::TextDisabled("%s", label);
+            ImGui::BeginDisabled(!enabled);
+            const int before = value;
+            const float input_width = 82.0f;
+            const float control_width = form_width();
+            const float slider_width = std::max(1.0f, control_width - input_width - ImGui::GetStyle().ItemSpacing.x);
+            set_form_x();
+            ImGui::SetNextItemWidth(slider_width);
+            if (ImGui::SliderInt("##slider", &value, min_value, max_value, "%d", ImGuiSliderFlags_AlwaysClamp))
+                changed = true;
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(input_width);
+            if (ImGui::InputInt("##input", &value, 0, 0, ImGuiInputTextFlags_EnterReturnsTrue))
+                changed = true;
+            if (ImGui::IsItemDeactivatedAfterEdit())
+            {
+                value = std::min(max_value, std::max(min_value, value));
+                changed = changed || before != value;
+            }
+            ImGui::EndDisabled();
+            ImGui::PopID();
+        };
+
+        auto metric_card = [&](const char* label, const std::string& value, ImVec4 value_color = ImVec4(0.90f, 0.90f, 0.90f, 1.0f)) {
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, Surface);
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 1.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
+            if (ImGui::BeginChild(label, ImVec2(0.0f, 48.0f), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse))
+            {
+                ImGui::SetCursorPos(ImVec2(8.0f, 5.0f));
+                ImGui::TextDisabled("%s", label);
+                ImGui::SetCursorPos(ImVec2(8.0f, 20.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, value_color);
+                ImGui::TextWrapped("%s", value.empty() ? "-" : value.c_str());
+                ImGui::PopStyleColor();
+            }
+            ImGui::EndChild();
+            ImGui::PopStyleVar(2);
+            ImGui::PopStyleColor();
+        };
+
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.045f, 0.045f, 0.045f, 1.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        constexpr float HeaderHeight = 36.0f;
+        if (ImGui::BeginChild("TopAppBar", ImVec2(0.0f, HeaderHeight), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse))
+        {
+            const ImVec2 bar_pos = ImGui::GetWindowPos();
+            const ImVec2 bar_size = ImGui::GetWindowSize();
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            const float icon_size = 20.0f;
+            const ImVec2 icon_pos(bar_pos.x + 10.0f, bar_pos.y + (HeaderHeight - icon_size) * 0.5f);
+            ImGui::SetCursorScreenPos(icon_pos);
+            draw_app_mark(icon_pos, ImVec2(icon_pos.x + icon_size, icon_pos.y + icon_size));
+            const float title_x = icon_pos.x + 28.0f;
+            const float heading_height = g_heading_font ? 18.0f : ImGui::GetTextLineHeight();
+            const float title_y = bar_pos.y + (HeaderHeight - heading_height) * 0.5f - 1.0f;
+            ImGui::SetCursorScreenPos(ImVec2(title_x, title_y));
+            if (g_heading_font)
+                ImGui::PushFont(g_heading_font);
+            ImGui::TextUnformatted("Meccha Camouflage");
+            const float title_width = ImGui::GetItemRectSize().x;
+            if (g_heading_font)
+                ImGui::PopFont();
+            ImGui::SetCursorScreenPos(ImVec2(title_x + title_width + 8.0f,
+                                             bar_pos.y + (HeaderHeight - ImGui::GetTextLineHeight()) * 0.5f));
+            ImGui::TextDisabled("v1.4.0");
+
+            const float close_width = 28.0f;
+            const float minimize_width = 28.0f;
+            const ImVec2 minimize_min(bar_pos.x + bar_size.x - close_width - minimize_width - 14.0f, bar_pos.y + (HeaderHeight - 28.0f) * 0.5f);
+            ImGui::SetCursorScreenPos(minimize_min);
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.12f, 0.13f, 0.12f, 0.65f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.18f, 0.20f, 0.15f, 0.80f));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+            if (ImGui::Button("##MinimizeApp", ImVec2(minimize_width, 28.0f)))
+                actions.minimize_clicked = true;
+            const ImVec2 min_min = ImGui::GetItemRectMin();
+            const ImVec2 min_max = ImGui::GetItemRectMax();
+            const ImU32 minimize_color = ImGui::GetColorU32(ImGui::IsItemHovered() ? ImGuiCol_Text : ImGuiCol_TextDisabled);
+            draw->AddLine(ImVec2(min_min.x + 9.0f, min_max.y - 9.0f), ImVec2(min_max.x - 9.0f, min_max.y - 9.0f), minimize_color, 1.5f);
+            if (ImGui::IsItemHovered())
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor(3);
+
+            const ImVec2 close_min(bar_pos.x + bar_size.x - close_width - 10.0f, bar_pos.y + (HeaderHeight - 28.0f) * 0.5f);
+            ImGui::SetCursorScreenPos(close_min);
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.12f, 0.13f, 0.12f, 0.65f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.18f, 0.20f, 0.15f, 0.80f));
+            ImGui::PushStyleColor(ImGuiCol_Text, Muted);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+            if (ImGui::Button("##CloseApp", ImVec2(close_width, 28.0f)))
+                actions.close_clicked = true;
+            const ImVec2 x_min = ImGui::GetItemRectMin();
+            const ImVec2 x_max = ImGui::GetItemRectMax();
+            const ImU32 x_color = ImGui::GetColorU32(ImGui::IsItemHovered() ? ImGuiCol_Text : ImGuiCol_TextDisabled);
+            draw->AddLine(ImVec2(x_min.x + 9.0f, x_min.y + 9.0f), ImVec2(x_max.x - 9.0f, x_max.y - 9.0f), x_color, 1.5f);
+            draw->AddLine(ImVec2(x_max.x - 9.0f, x_min.y + 9.0f), ImVec2(x_min.x + 9.0f, x_max.y - 9.0f), x_color, 1.5f);
+            if (ImGui::IsItemHovered())
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor(4);
+
+            draw->AddLine(ImVec2(bar_pos.x, bar_pos.y + HeaderHeight - 1.0f),
+                          ImVec2(bar_pos.x + bar_size.x, bar_pos.y + HeaderHeight - 1.0f),
+                          ImGui::GetColorU32(Hairline),
+                          1.0f);
+
+            if (ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 2.0f))
+            {
+                ReleaseCapture();
+                SendMessageW(GetActiveWindow(), WM_NCLBUTTONDOWN, HTCAPTION, 0);
+            }
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor();
+
+        const float footer_height = 24.0f;
+        constexpr float ContentPadX = 8.0f;
+        constexpr float HeaderGap = 6.0f;
+        constexpr float FooterGap = 6.0f;
+        ImGui::SetCursorPos(ImVec2(ContentPadX, HeaderHeight + HeaderGap));
+        const float content_height = std::max(1.0f, io.DisplaySize.y - HeaderHeight - footer_height - HeaderGap - FooterGap);
+        const float total_width = std::max(1.0f, ImGui::GetContentRegionAvail().x - ContentPadX);
+        const float gutter = 16.0f;
+        const float left_width = std::max(1.0f, (total_width - gutter) * 0.5f);
+        if (ImGui::BeginChild("MainContent", ImVec2(total_width, content_height), false))
+        {
+            if (ImGui::BeginChild("ControlsColumn", ImVec2(left_width, 0.0f), false))
+            {
+                const bool can_stop = runtime.paint_running;
+                const bool can_start = runtime.service_state != "Starting" &&
+                                       runtime.service_state != "Stopping" &&
+                                       !runtime.paint_running;
+                const float service_gap = style.ItemSpacing.x;
+                const float button_width = std::max(1.0f, (ImGui::GetContentRegionAvail().x - service_gap) * 0.5f);
+                if (action_button("(Re)Start / Hotkey", can_start, can_start, ImVec2(button_width, 30.0f)))
+                    actions.start_service_clicked = true;
+                ImGui::SameLine();
+                if (action_button("Stop / Kill", can_stop, false, ImVec2(button_width, 30.0f)))
+                    actions.stop_service_clicked = true;
+                ImGui::Dummy(ImVec2(0.0f, 2.0f));
+
+                const float settings_height = std::max(1.0f, ImGui::GetContentRegionAvail().y);
+                if (begin_panel("SettingsPanel", ImVec2(0.0f, settings_height), true, false, ImVec2(0.0f, 0.0f)))
                 {
+                    section_header("PAINT SETTINGS", true);
+                    PaintTuning tuning = runtime.paint_editing ? draft.tuning : persisted.tuning;
+                    bool paint_value_changed = false;
+                    field_double("Brush size (texels)", tuning.stroke_size_texels, 1.0, 12.0, "%.1f", runtime.paint_editing, paint_value_changed);
+                    field_double("Coverage step (texels)", tuning.coverage_step_texels, 1.0, 12.0, "%.1f", runtime.paint_editing, paint_value_changed);
+                    field_int("Max strokes", tuning.max_strokes, 1000, 100000, runtime.paint_editing, paint_value_changed);
+                    field_int("Batch limit", tuning.server_batch_limit, 1, 50, runtime.paint_editing, paint_value_changed);
+                    field_int("Batch delay (ms)", tuning.server_batch_delay_ms, 1, 1000, runtime.paint_editing, paint_value_changed);
+
+                    const float action_footer_height = 38.0f;
+                    const float app_block_height = 216.0f;
+                    const float app_target_y = ImGui::GetWindowContentRegionMax().y - action_footer_height - app_block_height;
+                    const float active_block_height = 44.0f;
+                    ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY() + 2.0f, app_target_y - active_block_height));
+                    set_form_x();
+                    ImGui::TextDisabled("ACTIVE REGIONS");
+                    set_form_x();
+                    if (custom_checkbox("Front", tuning.enable_front_paint, runtime.paint_editing))
+                        paint_value_changed = true;
+                    ImGui::SameLine(0.0f, 18.0f);
+                    if (custom_checkbox("Side", tuning.enable_side_paint, runtime.paint_editing))
+                        paint_value_changed = true;
+                    ImGui::SameLine(0.0f, 18.0f);
+                    if (custom_checkbox("Back", tuning.enable_back_paint, runtime.paint_editing))
+                        paint_value_changed = true;
+                    if (runtime.paint_editing && paint_value_changed)
+                    {
+                        draft.tuning = tuning;
+                        actions.settings_changed = true;
+                    }
+
+                    ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY() + 6.0f, app_target_y));
+                    const ImVec2 app_block_pos = ImGui::GetCursorScreenPos();
+                    const float app_block_width = ImGui::GetContentRegionAvail().x;
+                    ImGui::GetWindowDrawList()->AddRectFilled(app_block_pos,
+                                                              ImVec2(app_block_pos.x + app_block_width, app_block_pos.y + app_block_height),
+                                                              ImGui::GetColorU32(SurfaceLow));
+                    section_header("APP SETTINGS");
                     bool always_on_top = runtime.app_editing ? draft.always_on_top : persisted.always_on_top;
                     float opacity = runtime.app_editing ? draft.opacity : persisted.opacity;
                     bool app_value_changed = false;
-                    ImGui::BeginDisabled(!runtime.app_editing);
-                    ImGui::TableNextRow();
-                    ImGui::TableSetColumnIndex(0);
-                    ImGui::TextUnformatted("Always on top");
-                    ImGui::TableSetColumnIndex(1);
-                    if (ImGui::Checkbox("##AlwaysOnTop", &always_on_top))
-                        app_value_changed = true;
-
-                    input_opacity_setting(opacity, app_value_changed);
-                    ImGui::EndDisabled();
-
-                    ImGui::TableNextRow();
-                    ImGui::TableSetColumnIndex(0);
-                    ImGui::TextUnformatted("Paint hotkey");
-                    ImGui::TableSetColumnIndex(1);
-                    ImGui::Dummy(ImVec2(0.0f, 1.0f));
-                    if (!runtime.app_editing)
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-                    if (g_heading_font)
-                        ImGui::PushFont(g_heading_font);
-                    ImGui::TextUnformatted((runtime.app_editing ? draft.paint_hotkey : persisted.paint_hotkey).c_str());
-                    if (g_heading_font)
-                        ImGui::PopFont();
-                    if (!runtime.app_editing)
-                        ImGui::PopStyleColor();
-                    ImGui::SameLine();
+                    app_row("Paint hotkey");
+                    const float record_width = 82.0f;
+                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 4.0f));
                     ImGui::BeginDisabled(!runtime.app_editing);
                     if (runtime.recording_hotkey)
-                        ImGui::Button("Press a key...", ImVec2(132.0f, 0.0f));
-                    else if (icon_button("##RecordHotkey", UiIcon::Record, "Record hotkey"))
+                        ImGui::Button("Press key...", ImVec2(record_width, 26.0f));
+                    else if (ImGui::Button("Record", ImVec2(record_width, 26.0f)))
                         actions.start_hotkey_recording = true;
                     ImGui::EndDisabled();
+                    ImGui::PopStyleVar();
+                    ImGui::SameLine(0.0f, 12.0f);
+                    readonly_value_box("HotkeyReadonly",
+                                       (runtime.app_editing ? draft.paint_hotkey : persisted.paint_hotkey).c_str(),
+                                       ImVec2(82.0f, 26.0f));
+
+                    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 2.0f);
+                    app_row("Always on top");
+                    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 5.0f);
+                    if (checkbox_box("AlwaysOnTop", always_on_top, runtime.app_editing))
+                        app_value_changed = true;
+                    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 3.0f);
+                    app_row("Opacity");
+                    int opacity_percent = static_cast<int>(opacity * 100.0f + 0.5f);
+                    ImGui::BeginDisabled(!runtime.app_editing);
+                    const float opacity_input_width = 82.0f;
+                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 3.0f));
+                    ImGui::SetNextItemWidth(std::max(1.0f, app_control_width() - opacity_input_width - style.ItemSpacing.x));
+                    if (ImGui::SliderInt("##OpacitySliderNvidia", &opacity_percent, 35, 100, "%d%%", ImGuiSliderFlags_AlwaysClamp))
+                    {
+                        opacity = static_cast<float>(std::min(100, std::max(35, opacity_percent))) / 100.0f;
+                        app_value_changed = true;
+                    }
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(opacity_input_width);
+                    if (ImGui::InputInt("##OpacityInputNvidia", &opacity_percent, 0, 0, ImGuiInputTextFlags_EnterReturnsTrue))
+                    {
+                        opacity_percent = std::min(100, std::max(35, opacity_percent));
+                        opacity = static_cast<float>(opacity_percent) / 100.0f;
+                        app_value_changed = true;
+                    }
+                    ImGui::PopStyleVar();
+                    ImGui::EndDisabled();
+                    app_row("Log directory");
+                    const ImVec2 folder_pos = ImGui::GetCursorScreenPos();
+                    draw_folder_icon(ImVec2(folder_pos.x, folder_pos.y + 1.0f), ImGui::GetColorU32(Primary));
+                    ImGui::Dummy(ImVec2(20.0f, 18.0f));
+                    ImGui::SameLine(0.0f, 4.0f);
+                    ImGui::PushStyleColor(ImGuiCol_Text, Primary);
+                    ImGui::TextWrapped("%s", runtime.log_dir.c_str());
+                    const bool log_hovered = ImGui::IsItemHovered();
+                    const bool log_clicked = ImGui::IsItemClicked();
+                    const ImVec2 log_min = ImGui::GetItemRectMin();
+                    const ImVec2 log_max = ImGui::GetItemRectMax();
+                    ImGui::GetWindowDrawList()->AddLine(ImVec2(log_min.x, log_max.y), ImVec2(log_max.x, log_max.y), ImGui::GetColorU32(Primary), 1.0f);
+                    if (log_hovered)
+                    {
+                        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                        ImGui::SetTooltip("%s", runtime.log_dir.c_str());
+                    }
+                    if (log_clicked)
+                        actions.open_logs_clicked = true;
+                    ImGui::PopStyleColor();
                     if (runtime.app_editing && app_value_changed)
                     {
                         draft.always_on_top = always_on_top;
                         draft.opacity = opacity;
                         actions.settings_changed = true;
                     }
-                    ImGui::EndTable();
-                }
-                settings_action_row(runtime.app_editing,
-                                    actions.edit_app_clicked,
-                                    actions.save_app_clicked,
-                                    actions.cancel_app_clicked,
-                                    actions.reset_app_clicked);
-            }
-            end_section();
-
-            if (begin_section("PaintSettingsBlock", "Paint Settings", ImVec2(0.0f, paint_block_height)))
-            {
-                ImGui::Spacing();
-                if (begin_form_table("PaintSettingsTable"))
-                {
-                    PaintTuning tuning = runtime.paint_editing ? draft.tuning : persisted.tuning;
-                    bool paint_value_changed = false;
-                    ImGui::BeginDisabled(!runtime.paint_editing);
-                    ImGui::TableNextRow();
-                    ImGui::TableSetColumnIndex(0);
-                    ImGui::TextUnformatted("Quality preset");
-                    ImGui::TableSetColumnIndex(1);
-                    const char* presets[] = {"Balanced", "High", "Ultra"};
-                    if (ImGui::BeginCombo("##QualityPreset", tuning.quality_preset.c_str()))
+                    const float footer_height = action_footer_height;
+                    const float footer_y = ImGui::GetWindowContentRegionMax().y - footer_height;
+                    ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY(), footer_y));
+                    const ImVec2 footer_pos = ImGui::GetCursorScreenPos();
+                    const float footer_width = ImGui::GetContentRegionAvail().x;
+                    ImGui::GetWindowDrawList()->AddRectFilled(footer_pos,
+                                                              ImVec2(footer_pos.x + footer_width, footer_pos.y + footer_height),
+                                                              ImGui::GetColorU32(SurfaceLow));
+                    ImGui::GetWindowDrawList()->AddLine(footer_pos,
+                                                        ImVec2(footer_pos.x + footer_width, footer_pos.y),
+                                                        ImGui::GetColorU32(Hairline));
+                    const float button_width = 64.0f;
+                    const float button_gap = style.ItemSpacing.x;
+                    const float button_total = button_width * 4.0f + button_gap * 3.0f;
+                    ImGui::SetCursorScreenPos(ImVec2(footer_pos.x + footer_width - button_total - 10.0f, footer_pos.y + 5.0f));
+                    ImGui::PushID("PaintFooterActions");
+                    const bool editing_any = runtime.paint_editing || runtime.app_editing;
+                    if (action_button("Reset", editing_any, false, ImVec2(button_width, 28.0f)))
                     {
-                        for (const char* preset : presets)
-                        {
-                            const bool selected = tuning.quality_preset == preset;
-                            if (ImGui::Selectable(preset, selected))
-                            {
-                                tuning.quality_preset = preset;
-                                if (tuning.quality_preset == "Balanced")
-                                {
-                                    tuning.stroke_size_texels = 5.0;
-                                    tuning.coverage_step_texels = 8.0;
-                                    tuning.max_strokes = 15000;
-                                }
-                                else if (tuning.quality_preset == "Ultra")
-                                {
-                                    tuning.stroke_size_texels = 3.5;
-                                    tuning.coverage_step_texels = 4.0;
-                                    tuning.max_strokes = 50000;
-                                }
-                                else
-                                {
-                                    tuning.stroke_size_texels = 4.0;
-                                    tuning.coverage_step_texels = 6.0;
-                                    tuning.max_strokes = 25000;
-                                }
-                                tuning.front_back_source_max_uv = 0.45;
-                                paint_value_changed = true;
-                            }
-                            if (selected)
-                                ImGui::SetItemDefaultFocus();
-                        }
-                        ImGui::EndCombo();
+                        actions.reset_app_clicked = true;
+                        actions.reset_paint_clicked = true;
                     }
-                    input_double_setting("Brush size (texels)", tuning.stroke_size_texels, 1.0, 12.0, "%.1f", paint_value_changed);
-                    input_double_setting("Coverage step (texels)", tuning.coverage_step_texels, 1.0, 12.0, "%.1f", paint_value_changed);
-                    input_double_setting("Side guard", tuning.side_source_max_uv, 0.001, 0.5, "%.3f", paint_value_changed);
-                    input_double_setting("Front/back guard", tuning.front_back_source_max_uv, 0.001, 2.0, "%.3f", paint_value_changed);
-                    input_int_setting("Max strokes", tuning.max_strokes, 1000, 100000, paint_value_changed);
-                    input_int_setting("Batch limit", tuning.server_batch_limit, 1, 50, paint_value_changed);
-                    input_int_setting("Batch delay ms", tuning.server_batch_delay_ms, 1, 1000, paint_value_changed);
-                    ImGui::TableNextRow();
-                    ImGui::TableSetColumnIndex(0);
-                    ImGui::TextUnformatted("Regions");
-                    ImGui::TableSetColumnIndex(1);
-                    if (ImGui::Checkbox("Mesh front", &tuning.enable_front_paint))
-                        paint_value_changed = true;
                     ImGui::SameLine();
-                    if (ImGui::Checkbox("Mesh side", &tuning.enable_side_paint))
-                        paint_value_changed = true;
-                    ImGui::SameLine();
-                    if (ImGui::Checkbox("Mesh back", &tuning.enable_back_paint))
-                        paint_value_changed = true;
-                    ImGui::EndDisabled();
-                    if (runtime.paint_editing && paint_value_changed)
+                    if (action_button("Cancel", editing_any, false, ImVec2(button_width, 28.0f)))
                     {
-                        draft.tuning = tuning;
+                        actions.cancel_app_clicked = true;
+                        actions.cancel_paint_clicked = true;
+                    }
+                    ImGui::SameLine();
+                    if (action_button("Edit", !editing_any, false, ImVec2(button_width, 28.0f)))
+                    {
+                        actions.edit_app_clicked = true;
+                        actions.edit_paint_clicked = true;
+                    }
+                    ImGui::SameLine();
+                    if (action_button("Save", editing_any, true, ImVec2(button_width, 28.0f)))
+                    {
+                        actions.save_app_clicked = true;
+                        actions.save_paint_clicked = true;
+                    }
+                    ImGui::PopID();
+                }
+                end_panel();
+            }
+            ImGui::EndChild();
+
+            ImGui::SameLine(0.0f, gutter);
+
+            if (ImGui::BeginChild("RuntimeColumn", ImVec2(0.0f, 0.0f), false))
+            {
+                static std::size_t previous_log_size = 0;
+                if (ImGui::BeginChild("StatusStrip", ImVec2(0.0f, 56.0f), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse))
+                {
+                    if (ImGui::BeginTable("RuntimeStatusGrid", 4, ImGuiTableFlags_SizingStretchSame))
+                    {
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        metric_card("GAME", runtime.game_attached ? "ATTACHED" : "WAITING", status_color(runtime.game_attached ? "attached" : "waiting"));
+                        ImGui::TableSetColumnIndex(1);
+                        metric_card("BRIDGE", runtime.bridge_ready ? "READY" : "WAITING", status_color(runtime.bridge_ready ? "ready" : "waiting"));
+                        ImGui::TableSetColumnIndex(2);
+                        metric_card("SERVICE", runtime.service_state.empty() ? "-" : runtime.service_state, status_color(runtime.service_state));
+                        ImGui::TableSetColumnIndex(3);
+                        metric_card("PAINT", runtime.paint_ready ? "READY" : (runtime.paint_running ? "RUNNING" : "WAITING"), status_color(runtime.paint_ready ? "ready" : (runtime.paint_running ? "running" : "waiting")));
+                        ImGui::EndTable();
+                    }
+                }
+                ImGui::EndChild();
+
+                if (ImGui::BeginChild("MetricStrip", ImVec2(0.0f, 56.0f), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse))
+                {
+                    if (ImGui::BeginTable("MetricGrid", 4, ImGuiTableFlags_SizingStretchSame))
+                    {
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        metric_card("SERVER ETA", runtime.metric_server_eta);
+                        ImGui::TableSetColumnIndex(1);
+                        metric_card("SERVER ELAPSED", runtime.metric_server_elapsed);
+                        ImGui::TableSetColumnIndex(2);
+                        metric_card("APPLY ETA", runtime.metric_apply_eta);
+                        ImGui::TableSetColumnIndex(3);
+                        metric_card("APPLY ELAPSED", runtime.metric_apply_elapsed);
+                        ImGui::EndTable();
+                    }
+                }
+                ImGui::EndChild();
+
+                if (begin_panel("LogPanel", ImVec2(0.0f, 0.0f), true, false, ImVec2(16.0f, 14.0f)))
+                {
+                    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 2.0f);
+                    ImGui::SetCursorPosX(16.0f);
+                    const bool all_active = draft.show_info && draft.show_warning && draft.show_error;
+                    bool all_filter = all_active;
+                    if (custom_checkbox("All", all_filter, true))
+                    {
+                        draft.show_info = all_filter;
+                        draft.show_warning = all_filter;
+                        draft.show_error = all_filter;
                         actions.settings_changed = true;
                     }
-                    ImGui::EndTable();
+                    ImGui::SameLine();
+                    if (custom_checkbox("Info", draft.show_info, true))
+                    {
+                        actions.settings_changed = true;
+                    }
+                    ImGui::SameLine();
+                    if (custom_checkbox("Warn", draft.show_warning, true))
+                    {
+                        actions.settings_changed = true;
+                    }
+                    ImGui::SameLine();
+                    if (custom_checkbox("Error", draft.show_error, true))
+                    {
+                        actions.settings_changed = true;
+                    }
+                    ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 8.0f, ImGui::GetContentRegionMax().x - 104.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.12f, 0.13f, 0.12f, 0.85f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.18f, 0.20f, 0.15f, 0.95f));
+                    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+                    if (ImGui::Button("    Copy All", ImVec2(96.0f, 24.0f)))
+                        actions.copy_log_clicked = true;
+                    draw_copy_icon(ImVec2(ImGui::GetItemRectMin().x + 7.0f, ImGui::GetItemRectMin().y + 4.0f), ImGui::GetColorU32(Muted));
+                    ImGui::PopStyleVar();
+                    ImGui::PopStyleColor(3);
+                    ImGui::Spacing();
+                    draw_colored_log_box("##MainLog", human_log_text, ImGui::GetContentRegionAvail(), previous_log_size);
                 }
-
-                settings_action_row(runtime.paint_editing,
-                                    actions.edit_paint_clicked,
-                                    actions.save_paint_clicked,
-                                    actions.cancel_paint_clicked,
-                                    actions.reset_paint_clicked);
+                end_panel();
             }
-            end_section();
-
+            ImGui::EndChild();
         }
         ImGui::EndChild();
-
-        ImGui::SameLine();
-
-        if (ImGui::BeginChild("LogPane", ImVec2(0.0f, content_height), false))
+        ImGui::SetCursorPosY(std::max(HeaderHeight, io.DisplaySize.y - footer_height));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        if (ImGui::BeginChild("FooterBar", ImVec2(0.0f, footer_height), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse))
         {
-            static std::size_t previous_log_size = 0;
-            static std::size_t previous_trace_size = 0;
-
-            const float log_width = ImGui::GetContentRegionAvail().x;
-            const float total_log_height = std::max(1.0f, ImGui::GetContentRegionAvail().y);
-            const float log_block_height = std::max(1.0f, (total_log_height - style.ItemSpacing.y) * 0.5f);
-
-            if (begin_section("LogBlock", "Log", ImVec2(log_width, log_block_height)))
-            {
-                const float log_controls_width = checkbox_control_width("Info") +
-                                                 checkbox_control_width("Warn") +
-                                                 checkbox_control_width("Error") +
-                                                 28.0f +
-                                                 style.ItemSpacing.x * 4.0f;
-                same_line_right(log_controls_width);
-                ImGui::PushStyleColor(ImGuiCol_Text, tone_color("info"));
-                if (ImGui::Checkbox("Info", &draft.show_info))
-                    actions.settings_changed = true;
-                ImGui::PopStyleColor();
-                ImGui::SameLine();
-                ImGui::PushStyleColor(ImGuiCol_Text, tone_color("warning"));
-                if (ImGui::Checkbox("Warn", &draft.show_warning))
-                    actions.settings_changed = true;
-                ImGui::PopStyleColor();
-                ImGui::SameLine();
-                ImGui::PushStyleColor(ImGuiCol_Text, tone_color("error"));
-                if (ImGui::Checkbox("Error", &draft.show_error))
-                    actions.settings_changed = true;
-                ImGui::PopStyleColor();
-                ImGui::SameLine();
-                if (icon_button("##CopyLog", UiIcon::Copy, "Copy log"))
-                    actions.copy_log_clicked = true;
-                ImGui::Spacing();
-                draw_colored_log_box("##MainLog", human_log_text, ImGui::GetContentRegionAvail(), previous_log_size);
-            }
-            end_section();
-
-            if (begin_section("TraceBlock", "Trace", ImVec2(log_width, log_block_height)))
-            {
-                same_line_right(28.0f);
-                if (icon_button("##CopyTrace", UiIcon::Copy, "Copy trace"))
-                    actions.copy_trace_clicked = true;
-                ImGui::Spacing();
-                draw_log_box("##TraceLog", trace_log_text, ImGui::GetContentRegionAvail(), previous_trace_size);
-            }
-            end_section();
+            SYSTEMTIME now{};
+            GetLocalTime(&now);
+            const ImVec2 footer_pos = ImGui::GetWindowPos();
+            ImGui::GetWindowDrawList()->AddLine(footer_pos,
+                                                ImVec2(footer_pos.x + ImGui::GetWindowSize().x, footer_pos.y),
+                                                ImGui::GetColorU32(Hairline),
+                                                1.0f);
+            const float text_y = std::max(0.0f, (footer_height - ImGui::GetTextLineHeight()) * 0.5f);
+            ImGui::SetCursorPos(ImVec2(8.0f, text_y));
+            ImGui::TextDisabled("(c) %u acentrist. All rights reserved. |", static_cast<unsigned>(now.wYear));
+            auto footer_link = [&](const char* id, const char* label, const char* tooltip, bool& clicked) {
+                ImGui::SameLine(0.0f, 5.0f);
+                const ImVec2 pos = ImGui::GetCursorScreenPos();
+                const ImVec2 size = ImGui::CalcTextSize(label);
+                ImGui::InvisibleButton(id, size);
+                const bool hovered = ImGui::IsItemHovered();
+                if (ImGui::IsItemClicked())
+                    clicked = true;
+                ImGui::GetWindowDrawList()->AddText(pos, ImGui::GetColorU32(hovered ? Primary : Muted), label);
+                if (hovered)
+                {
+                    ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                    ImGui::SetTooltip("%s", tooltip);
+                }
+            };
+            footer_link("FooterLicenseLink", LicenseLabel, "Open license", actions.open_license_clicked);
+            ImGui::SameLine(0.0f, 5.0f);
+            ImGui::TextDisabled("|");
+            footer_link("FooterGitHubLink", "GitHub", RepositoryUrl, actions.open_repository_clicked);
         }
         ImGui::EndChild();
+        ImGui::PopStyleVar();
         ImGui::End();
     }
 }

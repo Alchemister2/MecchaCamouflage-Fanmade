@@ -60,6 +60,7 @@ namespace
 
     HMODULE g_module = nullptr;
     std::atomic<bool> g_running{true};
+    std::atomic<int> g_active_client_handlers{0};
     std::atomic<bool> g_process_event_hook_installed{false};
     std::atomic<std::uintptr_t> g_original_process_event{0};
     std::atomic<HHOOK> g_message_hook{nullptr};
@@ -904,7 +905,7 @@ namespace
             }
             std::uintptr_t found = 0;
             for_each_object([&](std::uintptr_t obj) {
-                if (class_ptr(obj) == cls && object_name(obj).rfind("Default__", 0) != 0)
+                if (class_ptr(obj) == cls && object_name_raw(obj).rfind("Default__", 0) != 0)
                 {
                     found = obj;
                     return true;
@@ -4755,6 +4756,9 @@ namespace
         int unsafe_back{0};
         int unsafe_enabled{0};
         int unsafe_projection_color{0};
+        int unsafe_body_region{0};
+        int unsafe_limb_group{0};
+        int unsafe_source_distance{0};
         int source_depth_rejected{0};
         int source_facing_rejected{0};
         int source_direct_assignments{0};
@@ -4791,6 +4795,40 @@ namespace
             return stats.side_triangles;
         }
         return stats.back_triangles;
+    }
+
+    auto mesh_first_transfer_group_for_bone(const MeshFirstProfile* profile, int bone_index) -> std::string
+    {
+        if (!profile || bone_index < 0 || bone_index >= static_cast<int>(profile->bones.size()))
+        {
+            return {};
+        }
+        const auto name = lower_copy(profile->bones[static_cast<std::size_t>(bone_index)].name);
+        if (name.empty())
+        {
+            return {};
+        }
+        const bool left = name.size() >= 2 &&
+                          (name.rfind("_l") == name.size() - 2 ||
+                           name.rfind(".l") == name.size() - 2 ||
+                           name.rfind("-l") == name.size() - 2);
+        const bool right = name.size() >= 2 &&
+                           (name.rfind("_r") == name.size() - 2 ||
+                            name.rfind(".r") == name.size() - 2 ||
+                            name.rfind("-r") == name.size() - 2);
+        if (!left && !right)
+        {
+            return {};
+        }
+        if (contains_text(name, "leg") || contains_text(name, "foot") || contains_text(name, "hip"))
+        {
+            return left ? "leg_l" : "leg_r";
+        }
+        if (contains_text(name, "arm") || contains_text(name, "hand") || contains_text(name, "shoulder"))
+        {
+            return left ? "arm_l" : "arm_r";
+        }
+        return {};
     }
 
     auto mesh_first_uv_triangle_area(double u0, double v0, double u1, double v1, double u2, double v2) -> double
@@ -5620,11 +5658,13 @@ namespace
         return true;
     }
 
-    auto mesh_first_assign_colors(std::vector<MeshFirstPlanSample>& samples,
+    auto mesh_first_assign_colors(const MeshFirstProfile* profile,
+                                  std::vector<MeshFirstPlanSample>& samples,
                                   const SdkFrontCaptureResult& capture,
                                   bool enable_front,
                                   bool enable_side,
                                   bool enable_back,
+                                  double side_source_max_uv,
                                   MeshFirstPlanStats& stats) -> void
     {
         const auto& source_samples = capture.samples;
@@ -5632,6 +5672,41 @@ namespace
         std::vector<double> component_distances{};
         uv_distances.reserve(samples.size());
         component_distances.reserve(samples.size());
+        auto unknown_body = [](const std::string& value) -> bool {
+            return value.empty() || value == "unknown" || value == "runtime";
+        };
+        auto transfer_key = [&](const std::string& body, const std::string& transfer_group) -> std::string {
+            if (!transfer_group.empty())
+            {
+                return transfer_group;
+            }
+            if (!unknown_body(body))
+            {
+                return body;
+            }
+            return "__unknown";
+        };
+        std::vector<std::string> source_keys{};
+        std::vector<std::vector<int>> source_bins{};
+        auto source_bin_for_key = [&](const std::string& key) -> int {
+            for (int i = 0; i < static_cast<int>(source_keys.size()); ++i)
+            {
+                if (source_keys[static_cast<std::size_t>(i)] == key)
+                {
+                    return i;
+                }
+            }
+            source_keys.push_back(key);
+            source_bins.emplace_back();
+            return static_cast<int>(source_bins.size() - 1);
+        };
+        for (int i = 0; i < static_cast<int>(source_samples.size()); ++i)
+        {
+            const auto& source = source_samples[static_cast<std::size_t>(i)];
+            const auto source_body = lower_copy(source.body_region);
+            const auto source_group = mesh_first_transfer_group_for_bone(profile, source.dominant_bone);
+            source_bins[static_cast<std::size_t>(source_bin_for_key(transfer_key(source_body, source_group)))].push_back(i);
+        }
         std::vector<const FrontSample*> direct_source_by_plan_index(samples.size(), nullptr);
         for (const auto& source : source_samples)
         {
@@ -5640,6 +5715,7 @@ namespace
                 direct_source_by_plan_index[static_cast<std::size_t>(source.plan_index)] = &source;
             }
         }
+        const double side_component_distance_limit = clamp_range(side_source_max_uv * 500.0, 20.0, 80.0);
         for (std::size_t sample_index = 0; sample_index < samples.size(); ++sample_index)
         {
             auto& sample = samples[sample_index];
@@ -5675,27 +5751,119 @@ namespace
                     ++stats.enabled_samples;
                     continue;
                 }
-                Color projected_color{};
-                if (mesh_first_capture_project_color(capture, sample.world_position, projected_color))
+                if (profile && sample.region == MeshFirstRegion::Side)
                 {
-                    sample.source_distance_component = 0.0;
-                    sample.source_distance_uv = 0.0;
-                    component_distances.push_back(0.0);
-                    uv_distances.push_back(0.0);
-                    sample.r = clamp01(projected_color.r);
-                    sample.g = clamp01(projected_color.g);
-                    sample.b = clamp01(projected_color.b);
-                    sample.roughness = clamp01(projected_color.roughness);
-                    sample.metallic = clamp01(projected_color.metallic);
-                    sample.unsafe = false;
-                    ++stats.source_projection_assignments;
-                    ++stats.enabled_samples;
-                    continue;
+                    const auto sample_body = lower_copy(sample.body_region);
+                    const auto sample_transfer_group = mesh_first_transfer_group_for_bone(profile, sample.dominant_bone);
+                    const auto sample_key = transfer_key(sample_body, sample_transfer_group);
+                    int sample_bin = -1;
+                    for (int i = 0; i < static_cast<int>(source_keys.size()); ++i)
+                    {
+                        if (source_keys[static_cast<std::size_t>(i)] == sample_key)
+                        {
+                            sample_bin = i;
+                            break;
+                        }
+                    }
+                    bool saw_candidate = false;
+                    double best_distance_sq = std::numeric_limits<double>::infinity();
+                    double best_uv_distance_sq = std::numeric_limits<double>::infinity();
+                    const FrontSample* best = nullptr;
+                    const auto* candidate_indices = sample_bin >= 0 ? &source_bins[static_cast<std::size_t>(sample_bin)] : nullptr;
+                    if (candidate_indices)
+                    {
+                        for (const int source_index : *candidate_indices)
+                        {
+                            const auto& source = source_samples[static_cast<std::size_t>(source_index)];
+                            if (!source.has_component_position)
+                            {
+                                continue;
+                            }
+                            saw_candidate = true;
+                            const auto component_delta = sdk_vec_sub(sample.local_position, source.component_position);
+                            const double component_distance_sq = sdk_vec_dot(component_delta, component_delta);
+                            if (!std::isfinite(component_distance_sq))
+                            {
+                                continue;
+                            }
+                            const double du = sample.u - source.u;
+                            const double dv = sample.v - source.v;
+                            const double uv_distance_sq = du * du + dv * dv;
+                            if (component_distance_sq < best_distance_sq ||
+                                (component_distance_sq == best_distance_sq && uv_distance_sq < best_uv_distance_sq))
+                            {
+                                best_distance_sq = component_distance_sq;
+                                best_uv_distance_sq = uv_distance_sq;
+                                best = &source;
+                            }
+                        }
+                    }
+                    if (best)
+                    {
+                        sample.source_distance_component = std::sqrt(best_distance_sq);
+                        sample.source_distance_uv = std::sqrt(best_uv_distance_sq);
+                        component_distances.push_back(sample.source_distance_component);
+                        uv_distances.push_back(sample.source_distance_uv);
+                        sample.r = clamp01(best->r);
+                        sample.g = clamp01(best->g);
+                        sample.b = clamp01(best->b);
+                        sample.roughness = clamp01(std::max(0.35, best->roughness));
+                        sample.metallic = clamp01(best->metallic);
+                        sample.unsafe = !std::isfinite(sample.source_distance_component) ||
+                                        sample.source_distance_component > side_component_distance_limit;
+                        if (sample.unsafe)
+                        {
+                            ++stats.unsafe_source_distance;
+                        }
+                    }
+                    else
+                    {
+                        sample.source_distance_uv = std::numeric_limits<double>::infinity();
+                        sample.source_distance_component = std::numeric_limits<double>::infinity();
+                        sample.unsafe = true;
+                        if (!saw_candidate)
+                        {
+                            if (!sample_transfer_group.empty())
+                            {
+                                ++stats.unsafe_limb_group;
+                            }
+                            else
+                            {
+                                ++stats.unsafe_body_region;
+                            }
+                        }
+                    }
+                    if (!sample.unsafe)
+                    {
+                        ++stats.source_projection_assignments;
+                        ++stats.enabled_samples;
+                        continue;
+                    }
                 }
-                sample.source_distance_uv = std::numeric_limits<double>::infinity();
-                sample.source_distance_component = std::numeric_limits<double>::infinity();
-                sample.unsafe = true;
-                ++stats.unsafe_projection_color;
+                if (!(profile && sample.region == MeshFirstRegion::Side))
+                {
+                    Color projected_color{};
+                    if (mesh_first_capture_project_color(capture, sample.world_position, projected_color))
+                    {
+                        sample.source_distance_component = 0.0;
+                        sample.source_distance_uv = 0.0;
+                        component_distances.push_back(0.0);
+                        uv_distances.push_back(0.0);
+                        sample.r = clamp01(projected_color.r);
+                        sample.g = clamp01(projected_color.g);
+                        sample.b = clamp01(projected_color.b);
+                        sample.roughness = clamp01(projected_color.roughness);
+                        sample.metallic = clamp01(projected_color.metallic);
+                        sample.unsafe = false;
+                        ++stats.source_projection_assignments;
+                        ++stats.enabled_samples;
+                        continue;
+                    }
+                    sample.source_distance_uv = std::numeric_limits<double>::infinity();
+                    sample.source_distance_component = std::numeric_limits<double>::infinity();
+                    sample.unsafe = true;
+                    ++stats.unsafe_projection_color;
+                }
             }
             if (sample.unsafe)
             {
@@ -5906,6 +6074,9 @@ namespace
                ",\"unsafe_back\":" + std::to_string(stats.unsafe_back) +
                ",\"unsafe_enabled\":" + std::to_string(stats.unsafe_enabled) +
                ",\"unsafe_projection_color\":" + std::to_string(stats.unsafe_projection_color) +
+               ",\"unsafe_body_region\":" + std::to_string(stats.unsafe_body_region) +
+               ",\"unsafe_limb_group\":" + std::to_string(stats.unsafe_limb_group) +
+               ",\"unsafe_source_distance\":" + std::to_string(stats.unsafe_source_distance) +
                ",\"source_depth_rejected\":" + std::to_string(stats.source_depth_rejected) +
                ",\"source_facing_rejected\":" + std::to_string(stats.source_facing_rejected) +
                ",\"source_direct_assignments\":" + std::to_string(stats.source_direct_assignments) +
@@ -6045,6 +6216,19 @@ namespace
                ",\"" + key + "_failure\":\"" + json_escape(snapshot.failure) + "\"";
     }
 
+    auto mesh_first_pending_replication_strokes(const MeshFirstReplicationSnapshot& snapshot) -> int
+    {
+        if (snapshot.manager_component_queued_count_available && snapshot.manager_component_queued_count >= 0)
+        {
+            return snapshot.manager_component_queued_count;
+        }
+        if (snapshot.manager_queued_count_available && snapshot.manager_queued_count >= 0)
+        {
+            return snapshot.manager_queued_count;
+        }
+        return -1;
+    }
+
     struct MeshFirstServerBatchAsyncJob
     {
         std::shared_ptr<QueuedPaintJob> queued{};
@@ -6065,6 +6249,7 @@ namespace
         int server_batch_success{0};
         int server_batch_failures{0};
         int server_strokes_sent{0};
+        double server_batch_elapsed_ms{-1.0};
         std::size_t offset{0};
         std::string first_failure{};
         bool local_sync_started{false};
@@ -6075,8 +6260,14 @@ namespace
         std::string local_visual_sync_failure{};
         std::chrono::steady_clock::time_point started{};
         std::chrono::steady_clock::time_point local_sync_started_at{};
+        bool apply_wait_started{false};
+        std::chrono::steady_clock::time_point apply_wait_started_at{};
+        int apply_initial_pending_strokes{-1};
+        int apply_last_pending_strokes{-1};
+        int apply_zero_confirmations{0};
         std::chrono::steady_clock::time_point server_next_batch_time{};
         UINT_PTR server_batch_timer_id{0};
+        std::atomic<bool> cancel_requested{false};
     };
 
     std::mutex g_mesh_first_batch_mutex;
@@ -6095,7 +6286,6 @@ namespace
         const bool enable_side = json_bool_field(request, "enable_side_paint", true);
         const bool enable_back = json_bool_field(request, "enable_back_paint", true);
         const bool research_artifacts = json_bool_field(request, "research_artifacts", false);
-        const std::string quality_preset = json_string_field(request, "quality_preset", "High");
         const double tuning_stroke_size_texels = clamp_range(json_number_field(request, "stroke_size_texels", 4.0), 1.0, 12.0);
         const double tuning_coverage_step_texels = clamp_range(json_number_field(request, "coverage_step_texels", 6.0), 1.0, 12.0);
         const double tuning_side_source_max_uv = clamp_range(json_number_field(request, "side_source_max_uv", 0.08), 0.001, 0.50);
@@ -6116,7 +6306,6 @@ namespace
         metadata += ",\"enable_front_paint\":" + std::string(json_bool(enable_front));
         metadata += ",\"enable_side_paint\":" + std::string(json_bool(enable_side));
         metadata += ",\"enable_back_paint\":" + std::string(json_bool(enable_back));
-        metadata += ",\"quality_preset\":\"" + json_escape(quality_preset) + "\"";
         metadata += ",\"stroke_size_texels\":" + std::to_string(tuning_stroke_size_texels);
         metadata += ",\"coverage_step_texels\":" + std::to_string(tuning_coverage_step_texels);
         metadata += ",\"side_source_max_uv\":" + std::to_string(tuning_side_source_max_uv);
@@ -6554,16 +6743,21 @@ namespace
                                  metadata + ",\"replay_blocked\":true");
         }
 
-        mesh_first_assign_colors(plan_samples,
+        mesh_first_assign_colors(profile_available ? &profile : nullptr,
+                                 plan_samples,
                                  capture,
                                  enable_front,
                                  enable_side,
                                  enable_back,
+                                 tuning_side_source_max_uv,
                                  plan_stats);
         metadata += ",";
         metadata += mesh_first_plan_stats_metadata(plan_stats);
         metadata += ",\"planner_coverage_step_texels\":" + std::to_string(tuning_coverage_step_texels);
-        metadata += ",\"source_distance_policy\":\"camera_projection_pixel\"";
+        metadata += ",\"source_distance_policy\":\"" + std::string(profile_available ? "side_visible_pose_component_nearest_front_back_projection_pixel" : "camera_projection_pixel_dynamic") + "\"";
+        metadata += ",\"source_distance_side_max_uv\":" + std::to_string(tuning_side_source_max_uv);
+        metadata += ",\"source_distance_front_back_max_uv\":" + std::to_string(tuning_front_back_source_max_uv);
+        metadata += ",\"source_distance_side_max_component\":" + std::to_string(clamp_range(tuning_side_source_max_uv * 500.0, 20.0, 80.0));
         metadata += ",\"source_projection_color_available\":" + std::string(json_bool(capture.capture_pixels_available));
         metadata += ",\"source_samples\":" + std::to_string(capture.samples.size());
         if (plan_stats.unsafe_enabled > 0)
@@ -6603,8 +6797,8 @@ namespace
 
         std::vector<sdk::FPaintStroke> strokes{};
         strokes.reserve(static_cast<std::size_t>(plan_stats.enabled_samples));
-        const bool use_mesh_anchors = false;
-        metadata += ",\"replay_anchor_policy\":\"uv_only\"";
+        const bool use_mesh_anchors = profile_available && runtime_triangle_cache_mode == "profile_verified";
+        metadata += ",\"replay_anchor_policy\":\"" + std::string(use_mesh_anchors ? "profile_verified_triangle_anchor" : "uv_only_dynamic_runtime") + "\"";
         int replay_front = 0;
         int replay_side = 0;
         int replay_back = 0;
@@ -6718,8 +6912,8 @@ namespace
         const int estimated_replay_ms = std::max(0, estimated_batches - 1) * std::max(1, tuning_server_batch_delay_ms);
         metadata += ",\"server_batch_estimated_calls\":" + std::to_string(estimated_batches);
         metadata += ",\"estimated_replay_ms\":" + std::to_string(estimated_replay_ms);
-        metadata += ",\"skeletal_triangle_anchor_used\":true";
-        metadata += ",\"replay_anchor_mode\":\"skeletal_triangle\"";
+        metadata += ",\"skeletal_triangle_anchor_used\":" + std::string(json_bool(replay_triangle_anchors > 0));
+        metadata += ",\"replay_anchor_mode\":\"" + std::string(use_mesh_anchors ? "skeletal_triangle" : "uv_only") + "\"";
         metadata += ",\"replay_world_anchors\":" + std::to_string(replay_world_anchors);
         metadata += ",\"replay_local_anchors\":" + std::to_string(replay_local_anchors);
         metadata += ",\"replay_triangle_anchors\":" + std::to_string(replay_triangle_anchors);
@@ -6819,6 +7013,87 @@ namespace
         return true;
     }
 
+    auto mesh_first_cancel_response(const std::shared_ptr<MeshFirstServerBatchAsyncJob>& job,
+                                    const std::string& cancel_reason) -> std::string
+    {
+        return response_json(false,
+                             "mesh_paint_cancelled",
+                             job ? job->server_strokes_sent : 0,
+                             1,
+                             "mesh-first paint cancelled: " + cancel_reason,
+                             (job ? job->metadata : std::string{}) +
+                                 ",\"cancelled\":true" +
+                                 ",\"cancel_reason\":\"" + json_escape(cancel_reason) + "\"" +
+                                 ",\"server_batch_calls\":" + std::to_string(job ? job->server_batch_calls : 0) +
+                                 ",\"server_strokes_sent\":" + std::to_string(job ? job->server_strokes_sent : 0) +
+                                 ",\"local_stroke_success\":" + std::to_string(job ? job->local_stroke_success : 0));
+    }
+
+    auto cancel_active_mesh_first_batch_job(const char* reason) -> int
+    {
+        std::shared_ptr<MeshFirstServerBatchAsyncJob> job{};
+        {
+            std::lock_guard<std::mutex> lock(g_mesh_first_batch_mutex);
+            job = g_mesh_first_batch_job;
+        }
+        if (!job)
+        {
+            return 0;
+        }
+        const std::string cancel_reason = reason && *reason ? reason : "cancelled";
+        job->cancel_requested.store(true);
+        if (const auto thread_id = g_game_thread_id.load())
+        {
+            PostThreadMessageW(thread_id, PaintDispatchMessage, 0, 0);
+        }
+        if (job->queued)
+        {
+            std::unique_lock<std::mutex> lock(g_paint_jobs_mutex);
+            const bool completed = g_paint_jobs_cv.wait_for(lock, std::chrono::milliseconds(1500), [&]() {
+                return job->queued->done;
+            });
+            if (completed)
+            {
+                return 1;
+            }
+        }
+        const double elapsed_ms = std::chrono::duration<double, std::milli>(
+                                      std::chrono::steady_clock::now() - job->started)
+                                      .count();
+        write_bridge_progress("mesh_paint_cancelled",
+                              "mesh-first paint cancelled",
+                              0,
+                              1,
+                              elapsed_ms,
+                              "\"server_strokes_sent\":" + std::to_string(job->server_strokes_sent) +
+                                  ",\"server_batch_calls\":" + std::to_string(job->server_batch_calls) +
+                                  ",\"local_strokes_synced\":" + std::to_string(job->local_stroke_success) +
+                                  ",\"cancel_reason\":\"" + json_escape(cancel_reason) + "\"");
+        complete_mesh_first_batch_job(job, mesh_first_cancel_response(job, cancel_reason));
+        return 1;
+    }
+
+    auto cancel_queued_paint_jobs(const char* reason) -> int
+    {
+        std::vector<std::shared_ptr<QueuedPaintJob>> jobs{};
+        {
+            std::lock_guard<std::mutex> lock(g_paint_jobs_mutex);
+            jobs.swap(g_paint_jobs);
+        }
+        const std::string cancel_reason = reason && *reason ? reason : "cancelled";
+        for (const auto& job : jobs)
+        {
+            complete_queued_paint_job(job,
+                                      response_json(false,
+                                                    "paint_cancelled",
+                                                    0,
+                                                    1,
+                                                    "paint cancelled: " + cancel_reason,
+                                                    "\"cancelled\":true,\"cancel_reason\":\"" + json_escape(cancel_reason) + "\""));
+        }
+        return static_cast<int>(jobs.size());
+    }
+
     auto tick_mesh_first_batch_async_job() -> void
     {
         std::shared_ptr<MeshFirstServerBatchAsyncJob> job{};
@@ -6862,6 +7137,21 @@ namespace
             return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - job->started).count();
         };
 
+        if (job->cancel_requested.load())
+        {
+            write_bridge_progress("mesh_paint_cancelled",
+                                  "mesh-first paint cancelled",
+                                  0,
+                                  1,
+                                  elapsed_ms(),
+                                  "\"server_strokes_sent\":" + std::to_string(job->server_strokes_sent) +
+                                      ",\"server_batch_calls\":" + std::to_string(job->server_batch_calls) +
+                                      ",\"local_strokes_synced\":" + std::to_string(job->local_stroke_success) +
+                                      ",\"cancel_reason\":\"shutdown\"");
+            complete_mesh_first_batch_job(job, mesh_first_cancel_response(job, "shutdown"));
+            return;
+        }
+
         if (job->strokes.empty())
         {
             complete_mesh_first_batch_job(job,
@@ -6889,7 +7179,11 @@ namespace
 
         if (job->offset >= job->strokes.size())
         {
-            const double server_elapsed_ms = elapsed_ms();
+            if (job->server_batch_elapsed_ms < 0.0)
+            {
+                job->server_batch_elapsed_ms = elapsed_ms();
+            }
+            const double server_elapsed_ms = job->server_batch_elapsed_ms;
             if (!job->local_sync_started)
             {
                 job->local_sync_started = true;
@@ -6904,7 +7198,8 @@ namespace
                                       100,
                                       server_elapsed_ms,
                                       "\"local_sync_strokes_total\":" + std::to_string(job->strokes.size()) +
-                                          ",\"server_strokes_sent\":" + std::to_string(job->server_strokes_sent));
+                                          ",\"server_strokes_sent\":" + std::to_string(job->server_strokes_sent) +
+                                          ",\"server_batch_elapsed_ms\":" + std::to_string(server_elapsed_ms));
             }
 
             if (job->local_visual_sync_failure.empty() && job->local_offset < job->strokes.size())
@@ -6929,14 +7224,20 @@ namespace
                     ++job->local_offset;
                 }
 
+                const double sync_total_elapsed_ms = elapsed_ms();
+                const double sync_server_elapsed_ms =
+                    job->local_sync_started
+                        ? std::chrono::duration<double, std::milli>(job->local_sync_started_at - job->started).count()
+                        : sync_total_elapsed_ms;
                 write_bridge_progress("mesh_local_visual_sync",
                                       "Syncing local visual paint",
                                       99,
                                       100,
-                                      elapsed_ms(),
+                                      sync_total_elapsed_ms,
                                       "\"local_strokes_synced\":" + std::to_string(job->local_stroke_success) +
                                           ",\"local_strokes_total\":" + std::to_string(job->strokes.size()) +
-                                          ",\"local_sync_batch_limit\":" + std::to_string(job->local_visual_sync_batch_limit));
+                                          ",\"local_sync_batch_limit\":" + std::to_string(job->local_visual_sync_batch_limit) +
+                                          ",\"server_batch_elapsed_ms\":" + std::to_string(sync_server_elapsed_ms));
 
                 if (job->local_visual_sync_failure.empty() && job->local_offset < job->strokes.size())
                 {
@@ -6954,6 +7255,66 @@ namespace
                 job->local_visual_sync_failure.empty() &&
                 job->local_stroke_success == static_cast<int>(job->strokes.size());
             const std::string final_failure = !job->first_failure.empty() ? job->first_failure : job->local_visual_sync_failure;
+            if (local_visual_sync_ok && final_failure.empty())
+            {
+                Reflection wait_ref{};
+                std::string wait_ref_failure{};
+                if (wait_ref.init(wait_ref_failure))
+                {
+                    const auto apply_snapshot = mesh_first_capture_replication_snapshot(wait_ref, job->component);
+                    const int pending_strokes = mesh_first_pending_replication_strokes(apply_snapshot);
+                    if (pending_strokes > 0)
+                    {
+                        if (!job->apply_wait_started)
+                        {
+                            job->apply_wait_started = true;
+                            job->apply_wait_started_at = std::chrono::steady_clock::now();
+                            job->apply_initial_pending_strokes = pending_strokes;
+                        }
+                        job->apply_last_pending_strokes = pending_strokes;
+                        job->apply_zero_confirmations = 0;
+                        const double apply_elapsed_ms = std::chrono::duration<double, std::milli>(
+                                                            std::chrono::steady_clock::now() - job->apply_wait_started_at)
+                                                            .count();
+                        write_bridge_progress("mesh_apply_wait",
+                                              "Waiting for game paint apply queue",
+                                              99,
+                                              100,
+                                              total_elapsed_ms,
+                                              "\"apply_pending_strokes\":" + std::to_string(pending_strokes) +
+                                                  ",\"apply_initial_pending_strokes\":" + std::to_string(job->apply_initial_pending_strokes) +
+                                                  ",\"server_batch_elapsed_ms\":" + std::to_string(server_elapsed_ms) +
+                                                  ",\"local_visual_sync_elapsed_ms\":" + std::to_string(local_sync_elapsed_ms) +
+                                                  ",\"apply_queue_elapsed_ms\":" + std::to_string(apply_elapsed_ms));
+                        post_next_after(250);
+                        return;
+                    }
+                    if (job->apply_wait_started && pending_strokes == 0 && job->apply_zero_confirmations < 1)
+                    {
+                        ++job->apply_zero_confirmations;
+                        job->apply_last_pending_strokes = 0;
+                        const double apply_elapsed_ms = std::chrono::duration<double, std::milli>(
+                                                            std::chrono::steady_clock::now() - job->apply_wait_started_at)
+                                                            .count();
+                        write_bridge_progress("mesh_apply_wait",
+                                              "Waiting for game paint apply queue",
+                                              99,
+                                              100,
+                                              total_elapsed_ms,
+                                              "\"apply_pending_strokes\":0" +
+                                                  std::string(",\"apply_initial_pending_strokes\":") + std::to_string(job->apply_initial_pending_strokes) +
+                                                  ",\"server_batch_elapsed_ms\":" + std::to_string(server_elapsed_ms) +
+                                                  ",\"local_visual_sync_elapsed_ms\":" + std::to_string(local_sync_elapsed_ms) +
+                                                  ",\"apply_queue_elapsed_ms\":" + std::to_string(apply_elapsed_ms));
+                        post_next_after(250);
+                        return;
+                    }
+                }
+            }
+            const double apply_queue_elapsed_ms =
+                job->apply_wait_started
+                    ? std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - job->apply_wait_started_at).count()
+                    : 0.0;
             std::string metadata = job->metadata;
             metadata += ",\"server_batch_calls\":" + std::to_string(job->server_batch_calls);
             metadata += ",\"server_batch_success\":" + std::to_string(job->server_batch_success);
@@ -6967,6 +7328,10 @@ namespace
             metadata += ",\"local_visual_sync_ok\":" + std::string(json_bool(local_visual_sync_ok));
             metadata += ",\"local_visual_sync_failure\":\"" + json_escape(job->local_visual_sync_failure) + "\"";
             metadata += ",\"local_visual_sync_elapsed_ms\":" + std::to_string(local_sync_elapsed_ms);
+            metadata += ",\"apply_queue_wait_used\":" + std::string(json_bool(job->apply_wait_started));
+            metadata += ",\"apply_queue_elapsed_ms\":" + std::to_string(apply_queue_elapsed_ms);
+            metadata += ",\"apply_initial_pending_strokes\":" + std::to_string(job->apply_initial_pending_strokes);
+            metadata += ",\"apply_last_pending_strokes\":" + std::to_string(job->apply_last_pending_strokes);
             metadata += ",\"total_replay_elapsed_ms\":" + std::to_string(total_elapsed_ms);
             metadata += ",\"first_failure\":\"" + json_escape(final_failure) + "\"";
 
@@ -7003,6 +7368,12 @@ namespace
                                   "\"server_strokes_sent\":" + std::to_string(job->server_strokes_sent) +
                                       ",\"server_batch_calls\":" + std::to_string(job->server_batch_calls) +
                                       ",\"local_strokes_synced\":" + std::to_string(job->local_stroke_success) +
+                                      ",\"local_strokes_total\":" + std::to_string(job->strokes.size()) +
+                                      ",\"server_batch_elapsed_ms\":" + std::to_string(server_elapsed_ms) +
+                                      ",\"local_visual_sync_elapsed_ms\":" + std::to_string(local_sync_elapsed_ms) +
+                                      ",\"apply_queue_elapsed_ms\":" + std::to_string(apply_queue_elapsed_ms) +
+                                      ",\"apply_initial_pending_strokes\":" + std::to_string(job->apply_initial_pending_strokes) +
+                                      ",\"apply_pending_strokes\":" + std::to_string(std::max(0, job->apply_last_pending_strokes)) +
                                       ",\"front_strokes\":" + std::to_string(job->replay_front) +
                                       ",\"side_strokes\":" + std::to_string(job->replay_side) +
                                       ",\"back_strokes\":" + std::to_string(job->replay_back));
@@ -11027,15 +11398,67 @@ namespace
         }
         if (line.find("\"type\":\"shutdown\"") != std::string::npos)
         {
+            const int cancelled_active = cancel_active_mesh_first_batch_job("shutdown");
+            const int cancelled_queued = cancel_queued_paint_jobs("shutdown");
             uninstall_process_event_hook();
             g_running.store(false);
-            return response_json(true, "shutdown", 0, 0, "bridge shutdown requested");
+            return response_json(true,
+                                 "shutdown",
+                                 0,
+                                 0,
+                                 "bridge shutdown requested",
+                                 "\"cancelled_active_paint_jobs\":" + std::to_string(cancelled_active) +
+                                     ",\"cancelled_queued_paint_jobs\":" + std::to_string(cancelled_queued));
         }
         if (line.find("\"type\":\"paint_full_route\"") != std::string::npos)
         {
             return paint_full_route_native(line);
         }
         return response_json(false, "unknown_command", 0, 1, "unknown bridge command");
+    }
+
+    auto handle_bridge_client(SOCKET client) -> void
+    {
+        struct ClientGuard
+        {
+            SOCKET socket{INVALID_SOCKET};
+            ~ClientGuard()
+            {
+                if (socket != INVALID_SOCKET)
+                {
+                    closesocket(socket);
+                }
+                g_active_client_handlers.fetch_sub(1);
+            }
+        } guard{client};
+
+        const int timeout_ms = 5000;
+        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms));
+        std::string request{};
+        request.reserve(65536);
+        char buffer[16384]{};
+        while (request.size() < MaxRequestBytes)
+        {
+            const int received = recv(client, buffer, static_cast<int>(sizeof(buffer)), 0);
+            if (received <= 0)
+            {
+                break;
+            }
+            request.append(buffer, static_cast<std::size_t>(received));
+            if (request.find('\n') != std::string::npos)
+            {
+                break;
+            }
+        }
+        if (request.empty())
+        {
+            return;
+        }
+
+        const std::string response = request.size() >= MaxRequestBytes
+                                         ? response_json(false, "request_too_large", 0, 1, "bridge request exceeded max size")
+                                         : handle_request(request);
+        send(client, response.c_str(), static_cast<int>(response.size()), 0);
     }
 
     auto bridge_thread() -> void
@@ -11092,34 +11515,14 @@ namespace
                 continue;
             }
             last_activity = std::chrono::steady_clock::now();
-            const int timeout_ms = 5000;
-            setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms));
-            std::string request{};
-            request.reserve(65536);
-            char buffer[16384]{};
-            while (request.size() < MaxRequestBytes)
-            {
-                const int received = recv(client, buffer, static_cast<int>(sizeof(buffer)), 0);
-                if (received <= 0)
-                {
-                    break;
-                }
-                request.append(buffer, static_cast<std::size_t>(received));
-                if (request.find('\n') != std::string::npos)
-                {
-                    break;
-                }
-            }
-            if (!request.empty())
-            {
-                const std::string response = request.size() >= MaxRequestBytes
-                                                 ? response_json(false, "request_too_large", 0, 1, "bridge request exceeded max size")
-                                                 : handle_request(request);
-                send(client, response.c_str(), static_cast<int>(response.size()), 0);
-            }
-            closesocket(client);
+            g_active_client_handlers.fetch_add(1);
+            std::thread(handle_bridge_client, client).detach();
         }
         closesocket(listener);
+        while (g_active_client_handlers.load() > 0)
+        {
+            Sleep(50);
+        }
         WSACleanup();
         uninstall_process_event_hook();
         HMODULE module = g_module;
