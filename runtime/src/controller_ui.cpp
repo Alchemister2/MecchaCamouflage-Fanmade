@@ -833,6 +833,20 @@ namespace meccha
             ImGui::EndDisabled();
             ImGui::PopID();
         };
+        auto region_checkboxes = [&](bool& front, bool& side, bool& back, bool enabled, bool& changed) {
+            set_form_x();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextDisabled("%s", "Regions");
+            ImGui::SameLine(form_control_x());
+            if (custom_checkbox("Front", front, enabled))
+                changed = true;
+            ImGui::SameLine();
+            if (custom_checkbox("Side", side, enabled))
+                changed = true;
+            ImGui::SameLine();
+            if (custom_checkbox("Back", back, enabled))
+                changed = true;
+        };
 
         auto metric_card = [&](const char* label, const std::string& value, ImVec4 value_color = ImVec4(0.90f, 0.90f, 0.90f, 1.0f)) {
             ImGui::PushStyleColor(ImGuiCol_ChildBg, Surface);
@@ -979,6 +993,11 @@ namespace meccha
                     field_int("Batch delay (ms)", tuning.server_batch_delay_ms, 0, 1000, runtime.paint_editing, paint_value_changed);
                     field_double("Metallic", tuning.metallic, 0.0, 1.0, "%.6f", runtime.paint_editing, paint_value_changed);
                     field_double("Roughness", tuning.roughness, 0.0, 1.0, "%.6f", runtime.paint_editing, paint_value_changed);
+                    region_checkboxes(tuning.enable_front_paint,
+                                      tuning.enable_side_paint,
+                                      tuning.enable_back_paint,
+                                      runtime.paint_editing,
+                                      paint_value_changed);
                     if (runtime.paint_editing && paint_value_changed)
                     {
                         draft.tuning = tuning;

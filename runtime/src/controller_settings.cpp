@@ -180,7 +180,7 @@ namespace meccha
     void clamp_settings(AppSettings& settings)
     {
         settings.panel_width = std::max(1040.0f, settings.panel_width);
-        settings.panel_height = std::max(600.0f, settings.panel_height);
+        settings.panel_height = std::max(640.0f, settings.panel_height);
         settings.opacity = static_cast<float>(clamp_double(settings.opacity, 0.35, 1.0));
         settings.tuning.stroke_size_texels = clamp_double(settings.tuning.stroke_size_texels, 1.0, 12.0);
         settings.tuning.coverage_step_texels = clamp_double(settings.tuning.coverage_step_texels, 1.0, 12.0);
@@ -213,7 +213,7 @@ namespace meccha
         if (layout_version < settings.layout_version && settings.panel_width <= 1280.5f)
             settings.panel_width = 1040.0f;
         if (layout_version < settings.layout_version && settings.panel_height <= 660.5f)
-            settings.panel_height = 600.0f;
+            settings.panel_height = 640.0f;
         settings.always_on_top = extract_json_bool(text, "always_on_top", settings.always_on_top);
         settings.opacity = static_cast<float>(extract_json_number(text, "opacity", settings.opacity));
         if (const auto hotkey = extract_json_string(text, "start_hotkey"); !hotkey.empty())
@@ -226,6 +226,9 @@ namespace meccha
         settings.tuning.coverage_step_texels = extract_json_number(text, "coverage_step_texels", settings.tuning.coverage_step_texels);
         settings.tuning.side_source_max_uv = extract_json_number(text, "side_source_max_uv", settings.tuning.side_source_max_uv);
         settings.tuning.front_back_source_max_uv = extract_json_number(text, "front_back_source_max_uv", settings.tuning.front_back_source_max_uv);
+        settings.tuning.enable_front_paint = extract_json_bool(text, "enable_front_paint", settings.tuning.enable_front_paint);
+        settings.tuning.enable_side_paint = extract_json_bool(text, "enable_side_paint", settings.tuning.enable_side_paint);
+        settings.tuning.enable_back_paint = extract_json_bool(text, "enable_back_paint", settings.tuning.enable_back_paint);
         settings.tuning.metallic = extract_json_number(text, "metallic", settings.tuning.metallic);
         settings.tuning.roughness = extract_json_number(text, "roughness", settings.tuning.roughness);
         if (layout_version < 20 && settings.tuning.roughness <= 0.000001)
@@ -255,6 +258,9 @@ namespace meccha
             "  \"coverage_step_texels\": " + std::to_string(settings.tuning.coverage_step_texels) + ",\n" +
             "  \"side_source_max_uv\": " + std::to_string(settings.tuning.side_source_max_uv) + ",\n" +
             "  \"front_back_source_max_uv\": " + std::to_string(settings.tuning.front_back_source_max_uv) + ",\n" +
+            "  \"enable_front_paint\": " + std::string(settings.tuning.enable_front_paint ? "true" : "false") + ",\n" +
+            "  \"enable_side_paint\": " + std::string(settings.tuning.enable_side_paint ? "true" : "false") + ",\n" +
+            "  \"enable_back_paint\": " + std::string(settings.tuning.enable_back_paint ? "true" : "false") + ",\n" +
             "  \"server_batch_limit\": " + std::to_string(settings.tuning.server_batch_limit) + ",\n" +
             "  \"server_batch_delay_ms\": " + std::to_string(settings.tuning.server_batch_delay_ms) + ",\n" +
             "  \"metallic\": " + std::to_string(settings.tuning.metallic) + ",\n" +
