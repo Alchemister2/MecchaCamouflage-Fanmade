@@ -16,32 +16,41 @@ namespace meccha
 
     struct OverlayHotkeyState
     {
-        bool paint_requested{false};
+        bool start_requested{false};
+        bool stop_requested{false};
     };
 
-    auto parse_hotkey_binding(const std::string& text) -> HotkeyBinding;
+    auto parse_hotkey_binding(const std::string& text, UINT default_vk = VK_F10) -> HotkeyBinding;
     auto hotkey_to_string(const HotkeyBinding& binding) -> std::string;
-    auto hotkey_backend_json(const HotkeyBinding& binding, bool registered) -> std::string;
+    auto hotkey_backend_json(const HotkeyBinding& start, bool start_registered, const HotkeyBinding& stop, bool stop_registered) -> std::string;
     auto try_capture_hotkey_from_message(const MSG& msg, HotkeyBinding& out, std::string& error, bool& cancel) -> bool;
 
     class OverlayHotkeys
     {
     public:
-        explicit OverlayHotkeys(HotkeyBinding paint);
+        OverlayHotkeys(HotkeyBinding start, HotkeyBinding stop);
         ~OverlayHotkeys();
 
-        auto set_paint_hotkey(HotkeyBinding paint, std::string* error = nullptr) -> bool;
+        auto set_start_hotkey(HotkeyBinding start, std::string* error = nullptr) -> bool;
+        auto set_stop_hotkey(HotkeyBinding stop, std::string* error = nullptr) -> bool;
+        auto set_hotkeys(HotkeyBinding start, HotkeyBinding stop, std::string* error = nullptr) -> bool;
         auto backend_json() const -> std::string;
-        auto paint_binding() const -> HotkeyBinding { return paint_; }
-        auto paint_registered() const -> bool { return paint_registered_; }
+        auto start_binding() const -> HotkeyBinding { return start_; }
+        auto stop_binding() const -> HotkeyBinding { return stop_; }
+        auto start_registered() const -> bool { return start_registered_; }
+        auto stop_registered() const -> bool { return stop_registered_; }
         void handle_message(const MSG& msg, OverlayHotkeyState& state) const;
         void poll_fallback(OverlayHotkeyState& state);
 
     private:
-        void unregister_paint();
+        void unregister_start();
+        void unregister_stop();
 
-        HotkeyBinding paint_{};
-        bool paint_registered_{false};
-        bool paint_down_{false};
+        HotkeyBinding start_{};
+        HotkeyBinding stop_{VK_F9, 0};
+        bool start_registered_{false};
+        bool stop_registered_{false};
+        bool start_down_{false};
+        bool stop_down_{false};
     };
 }

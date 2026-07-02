@@ -40,7 +40,7 @@ namespace
     constexpr std::size_t MaxRequestBytes = 8 * 1024 * 1024;
     constexpr int ProcessEventVtableIndex = 0x4C;
     constexpr UINT PaintDispatchMessage = WM_APP + 0x4D43;
-    constexpr int ServerPaintBatchStrokeLimit = 50;
+    constexpr int ServerPaintBatchStrokeLimit = 500;
     constexpr int ServerPaintBatchDelayMs = 300;
     constexpr int MeshFirstServerBatchMinDelayMs = 15;
     constexpr double MeshFirstRuntimeCoordinateMaxAvgErrorCm = 50.0;
@@ -997,6 +997,7 @@ namespace
             }
             return 0;
         }
+
     };
 
     struct Color
@@ -3548,15 +3549,15 @@ namespace
                                        std::size_t offset,
                                        std::size_t count,
                                        std::string& failure) -> bool;
+    auto sdk_call_paint_at_uv_with_brush(std::uintptr_t component,
+                                         std::uintptr_t function,
+                                         const sdk::FPaintStroke& stroke,
+                                         std::string& failure) -> bool;
     auto sdk_call_server_paint_batch(const SdkContext& ctx,
                                      const std::vector<sdk::FPaintStroke>& strokes,
                                      std::size_t offset,
                                      std::size_t count,
                                      std::string& failure) -> bool;
-    auto sdk_call_paint_at_uv_with_brush(std::uintptr_t component,
-                                         std::uintptr_t function,
-                                         const sdk::FPaintStroke& stroke,
-                                         std::string& failure) -> bool;
 
     auto sdk_resolve_skinned_pose(Reflection& ref,
                                   std::uintptr_t mesh,
@@ -6799,12 +6800,12 @@ namespace
     auto paint_mesh_first_on_game_thread(const std::string& request,
                                          const std::shared_ptr<QueuedPaintJob>& queued_job) -> std::string
     {
-        const bool enable_front = json_bool_field(request, "enable_front_paint", true);
-        const bool enable_side = json_bool_field(request, "enable_side_paint", true);
-        const bool enable_back = json_bool_field(request, "enable_back_paint", true);
+        constexpr bool enable_front = true;
+        constexpr bool enable_side = true;
+        constexpr bool enable_back = true;
         const bool research_artifacts = json_bool_field(request, "research_artifacts", false);
-        const double tuning_stroke_size_texels = clamp_range(json_number_field(request, "stroke_size_texels", 4.0), 1.0, 12.0);
-        const double tuning_coverage_step_texels = clamp_range(json_number_field(request, "coverage_step_texels", 6.0), 1.0, 12.0);
+        const double tuning_stroke_size_texels = clamp_range(json_number_field(request, "stroke_size_texels", 4.0), 4.0, 12.0);
+        const double tuning_coverage_step_texels = clamp_range(json_number_field(request, "coverage_step_texels", 6.0), 6.0, 12.0);
         const double tuning_side_source_max_uv = clamp_range(json_number_field(request, "side_source_max_uv", 0.08), 0.001, 0.50);
         const double tuning_front_back_source_max_uv = clamp_range(json_number_field(request, "front_back_source_max_uv", 0.45), 0.001, 2.00);
         const double tuning_metallic = clamp_range(json_number_field(request, "metallic", 0.0), 0.0, 1.0);
@@ -7472,6 +7473,9 @@ namespace
         int replay_world_anchors = 0;
         int replay_local_anchors = 0;
         int replay_triangle_anchors = 0;
+        constexpr auto paint_target_channel = sdk::EPaintChannel::All;
+        metadata += ",\"paint_target_channel\":\"all\"";
+        metadata += ",\"paint_target_channel_value\":" + std::to_string(static_cast<int>(paint_target_channel));
         for (const auto& sample : plan_samples)
         {
             const bool enabled = (sample.region == MeshFirstRegion::Front && enable_front) ||
@@ -7492,7 +7496,7 @@ namespace
                                                             sample.v,
                                                             channel,
                                                             brush,
-                                                            sdk::EPaintChannel::Albedo,
+                                                            paint_target_channel,
                                                             sample.world_position,
                                                             sample.local_position,
                                                             sample.triangle_index,
@@ -7503,7 +7507,7 @@ namespace
                                                    sample.v,
                                                    channel,
                                                    brush,
-                                                   sdk::EPaintChannel::Albedo);
+                                                   paint_target_channel);
             if (stroke.bHasWorldPosition)
             {
                 ++replay_world_anchors;
@@ -7559,6 +7563,7 @@ namespace
         metadata += ",\"first_stroke_albedo_b\":" + std::to_string(first_stroke.ChannelData.AlbedoColor.B);
         metadata += ",\"first_stroke_metallic\":" + std::to_string(first_stroke.ChannelData.Metallic);
         metadata += ",\"first_stroke_roughness\":" + std::to_string(first_stroke.ChannelData.Roughness);
+        metadata += ",\"first_stroke_target_channel\":" + std::to_string(static_cast<int>(first_stroke.TargetChannel));
         metadata += ",\"replay_strokes_front\":" + std::to_string(replay_front);
         metadata += ",\"replay_strokes_side\":" + std::to_string(replay_side);
         metadata += ",\"replay_strokes_back\":" + std::to_string(replay_back);
@@ -7584,6 +7589,8 @@ namespace
         const auto local_paint_at_uv_function = ref.find_function(ctx.component, "PaintAtUVWithBrush");
         metadata += ",\"local_paint_rpc\":\"PaintAtUVWithBrush\"";
         metadata += ",\"local_paint_available\":" + std::string(json_bool(local_paint_at_uv_function != 0));
+        metadata += ",\"local_visual_sync_mode\":\"paint_at_uv_with_brush\"";
+        metadata += ",\"local_batch_strategy\":\"chunked_paint_at_uv\"";
         metadata += ",\"local_visual_sync_required\":true";
         metadata += ",\"local_visual_sync_after_server_success\":true";
         metadata += ",\"authoritative_replay\":\"server_paint_batch_then_local_visual_sync\"";
@@ -7695,7 +7702,8 @@ namespace
     }
 
     auto mesh_first_cancel_response(const std::shared_ptr<MeshFirstServerBatchAsyncJob>& job,
-                                    const std::string& cancel_reason) -> std::string
+                                    const std::string& cancel_reason,
+                                    const std::string& cancel_phase = {}) -> std::string
     {
         const int local_synced = job ? job->local_stroke_success : 0;
         const int local_total = job ? static_cast<int>(job->strokes.size()) : 0;
@@ -7710,7 +7718,9 @@ namespace
                              (job ? job->metadata : std::string{}) +
                                  ",\"cancelled\":true" +
                                  ",\"cancel_reason\":\"" + json_escape(cancel_reason) + "\"" +
-                                 ",\"cancel_phase\":\"" + std::string(job ? mesh_first_phase_name(job->phase) : "unknown") + "\"" +
+                                 ",\"cancel_phase\":\"" + json_escape(cancel_phase.empty()
+                                                                        ? std::string(job ? mesh_first_phase_name(job->phase) : "unknown")
+                                                                        : cancel_phase) + "\"" +
                                  ",\"server_batch_calls\":" + std::to_string(job ? job->server_batch_calls : 0) +
                                  ",\"server_batch_success\":" + std::to_string(job ? job->server_batch_success : 0) +
                                  ",\"server_batch_failures\":" + std::to_string(job ? job->server_batch_failures : 0) +
@@ -7721,8 +7731,10 @@ namespace
                                  ",\"local_visual_sync_used\":" + std::string(json_bool(job && job->local_visual_sync_enabled)) +
                                  ",\"local_visual_sync_started\":" + std::string(json_bool(job && job->local_sync_started)) +
                                  ",\"local_visual_sync_elapsed_ms\":" + std::to_string(local_elapsed_ms) +
-                                 ",\"local_visual_sync_failure\":\"" + json_escape(job ? job->local_visual_sync_failure : std::string{}) + "\"" +
-                                 ",\"local_batch_calls\":" + std::to_string(job ? job->local_batch_calls : 0) +
+                                     ",\"local_visual_sync_failure\":\"" + json_escape(job ? job->local_visual_sync_failure : std::string{}) + "\"" +
+                                     ",\"local_batch_limit\":" + std::to_string(job ? job->local_visual_sync_batch_limit : 0) +
+                                     ",\"local_batch_delay_ms\":" + std::to_string(job ? job->local_visual_sync_delay_ms : 0) +
+                                     ",\"local_batch_calls\":" + std::to_string(job ? job->local_batch_calls : 0) +
                                  ",\"local_stroke_success\":" + std::to_string(local_synced) +
                                  ",\"local_stroke_failures\":" + std::to_string(job ? job->local_stroke_failures : 0) +
                                  ",\"local_strokes_synced\":" + std::to_string(local_synced) +
@@ -7800,7 +7812,7 @@ namespace
                                                         "cancelled",
                                                         "\"remaining_strokes\":" + std::to_string(remaining_strokes) +
                                                             ",\"cancel_phase\":\"" + json_escape(cancel_phase) + "\""));
-        complete_mesh_first_batch_job(job, mesh_first_cancel_response(job, cancel_reason));
+        complete_mesh_first_batch_job(job, mesh_first_cancel_response(job, cancel_reason, cancel_phase));
         return 1;
     }
 
@@ -7913,7 +7925,7 @@ namespace
                                 "cancelled",
                                 "\"remaining_strokes\":" + std::to_string(remaining_strokes) +
                                     ",\"cancel_phase\":\"" + json_escape(cancelled_from_phase) + "\"");
-            complete_mesh_first_batch_job(job, mesh_first_cancel_response(job, cancel_reason));
+            complete_mesh_first_batch_job(job, mesh_first_cancel_response(job, cancel_reason, cancelled_from_phase));
         };
 
         auto finish_failed = [&](const std::string& stage,
@@ -7937,6 +7949,8 @@ namespace
             metadata += ",\"server_batch_elapsed_ms\":" + std::to_string(job->server_batch_elapsed_ms);
             metadata += ",\"server_elapsed_ms\":" + std::to_string(job->server_batch_elapsed_ms);
             metadata += ",\"server_eta_ms\":0";
+            metadata += ",\"local_batch_limit\":" + std::to_string(job->local_visual_sync_batch_limit);
+            metadata += ",\"local_batch_delay_ms\":" + std::to_string(job->local_visual_sync_delay_ms);
             metadata += ",\"local_batch_calls\":" + std::to_string(job->local_batch_calls);
             metadata += ",\"local_stroke_calls\":" + std::to_string(job->local_stroke_calls);
             metadata += ",\"local_stroke_success\":" + std::to_string(job->local_stroke_success);
@@ -7994,6 +8008,8 @@ namespace
             metadata += ",\"server_batch_elapsed_ms\":" + std::to_string(job->server_batch_elapsed_ms);
             metadata += ",\"server_elapsed_ms\":" + std::to_string(job->server_batch_elapsed_ms);
             metadata += ",\"server_eta_ms\":0";
+            metadata += ",\"local_batch_limit\":" + std::to_string(job->local_visual_sync_batch_limit);
+            metadata += ",\"local_batch_delay_ms\":" + std::to_string(job->local_visual_sync_delay_ms);
             metadata += ",\"local_batch_calls\":" + std::to_string(job->local_batch_calls);
             metadata += ",\"local_stroke_calls\":" + std::to_string(job->local_stroke_calls);
             metadata += ",\"local_stroke_success\":" + std::to_string(job->local_stroke_success);

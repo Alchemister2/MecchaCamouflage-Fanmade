@@ -24,6 +24,11 @@ namespace meccha
                    vk == VK_LWIN || vk == VK_RWIN;
         }
 
+        auto is_function_vk(UINT vk) -> bool
+        {
+            return vk >= VK_F1 && vk <= VK_F24;
+        }
+
         auto vk_label(UINT vk) -> std::string
         {
             if (vk >= 'A' && vk <= 'Z')
@@ -131,28 +136,16 @@ namespace meccha
             return out;
         }
 
-        auto current_modifiers() -> UINT
-        {
-            UINT mods = 0;
-            if (GetKeyState(VK_CONTROL) & 0x8000) mods |= MOD_CONTROL;
-            if (GetKeyState(VK_MENU) & 0x8000) mods |= MOD_ALT;
-            if (GetKeyState(VK_SHIFT) & 0x8000) mods |= MOD_SHIFT;
-            if ((GetKeyState(VK_LWIN) & 0x8000) || (GetKeyState(VK_RWIN) & 0x8000)) mods |= MOD_WIN;
-            return mods;
-        }
-
-        auto requires_modifier(UINT vk) -> bool
-        {
-            return (vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9');
-        }
+        constexpr int StartHotkeyId = 1;
+        constexpr int StopHotkeyId = 2;
     }
 
-    auto parse_hotkey_binding(const std::string& text) -> HotkeyBinding
+    auto parse_hotkey_binding(const std::string& text, UINT default_vk) -> HotkeyBinding
     {
         HotkeyBinding binding{};
-        binding.vk = VK_F10;
+        binding.vk = is_function_vk(default_vk) ? default_vk : VK_F10;
         binding.modifiers = 0;
-        for (const auto& raw : split_tokens(text.empty() ? std::string("F10") : text))
+        for (const auto& raw : split_tokens(text.empty() ? vk_label(binding.vk) : text))
         {
             const auto token = upper_copy(raw);
             if (token == "CTRL" || token == "CONTROL") binding.modifiers |= MOD_CONTROL;
@@ -161,8 +154,9 @@ namespace meccha
             else if (token == "WIN" || token == "WINDOWS") binding.modifiers |= MOD_WIN;
             else binding.vk = vk_from_label(token, binding.vk);
         }
-        if (is_modifier_vk(binding.vk))
-            binding.vk = VK_F10;
+        if (!is_function_vk(binding.vk))
+            binding.vk = is_function_vk(default_vk) ? default_vk : VK_F10;
+        binding.modifiers = 0;
         return binding;
     }
 
@@ -177,10 +171,12 @@ namespace meccha
         return out;
     }
 
-    auto hotkey_backend_json(const HotkeyBinding& binding, bool registered) -> std::string
+    auto hotkey_backend_json(const HotkeyBinding& start, bool start_registered, const HotkeyBinding& stop, bool stop_registered) -> std::string
     {
-        return std::string("{\"paint\":\"") + (registered ? "register_hotkey" : "async_state") +
-               "\",\"paint_key\":\"" + hotkey_to_string(binding) + "\"}";
+        return std::string("{\"start\":\"") + (start_registered ? "register_hotkey" : "async_state") +
+               "\",\"start_key\":\"" + hotkey_to_string(start) +
+               "\",\"stop\":\"" + (stop_registered ? "register_hotkey" : "async_state") +
+               "\",\"stop_key\":\"" + hotkey_to_string(stop) + "\"}";
     }
 
     auto try_capture_hotkey_from_message(const MSG& msg, HotkeyBinding& out, std::string& error, bool& cancel) -> bool
@@ -199,54 +195,62 @@ namespace meccha
             error = "Modifier-only hotkeys are not valid.";
             return false;
         }
-        out.vk = vk;
-        out.modifiers = current_modifiers();
-        if (out.modifiers == 0 && requires_modifier(vk))
+        if (!is_function_vk(vk))
         {
-            error = "Letter and number hotkeys require Ctrl, Alt, Shift, or Win.";
+            error = "Only function keys F1-F24 are valid hotkeys.";
             return false;
         }
+        out.vk = vk;
+        out.modifiers = 0;
         error.clear();
         return true;
     }
 
-    OverlayHotkeys::OverlayHotkeys(HotkeyBinding paint)
-        : paint_(paint)
+    OverlayHotkeys::OverlayHotkeys(HotkeyBinding start, HotkeyBinding stop)
+        : start_(start), stop_(stop)
     {
-        set_paint_hotkey(paint_);
+        set_hotkeys(start_, stop_);
     }
 
     OverlayHotkeys::~OverlayHotkeys()
     {
-        unregister_paint();
+        unregister_start();
+        unregister_stop();
     }
 
-    void OverlayHotkeys::unregister_paint()
+    void OverlayHotkeys::unregister_start()
     {
-        if (paint_registered_)
-            UnregisterHotKey(nullptr, 1);
-        paint_registered_ = false;
+        if (start_registered_)
+            UnregisterHotKey(nullptr, StartHotkeyId);
+        start_registered_ = false;
     }
 
-    auto OverlayHotkeys::set_paint_hotkey(HotkeyBinding paint, std::string* error) -> bool
+    void OverlayHotkeys::unregister_stop()
     {
-        if (paint_registered_ && paint.vk == paint_.vk && paint.modifiers == paint_.modifiers)
+        if (stop_registered_)
+            UnregisterHotKey(nullptr, StopHotkeyId);
+        stop_registered_ = false;
+    }
+
+    auto OverlayHotkeys::set_start_hotkey(HotkeyBinding start, std::string* error) -> bool
+    {
+        if (start_registered_ && start.vk == start_.vk && start.modifiers == start_.modifiers)
             return true;
 
-        const HotkeyBinding previous = paint_;
-        const bool previous_registered = paint_registered_;
-        unregister_paint();
-        paint_ = paint;
-        paint_down_ = false;
-        paint_registered_ = RegisterHotKey(nullptr, 1, paint_.modifiers | MOD_NOREPEAT, paint_.vk) != FALSE;
-        if (!paint_registered_)
+        const HotkeyBinding previous = start_;
+        const bool previous_registered = start_registered_;
+        unregister_start();
+        start_ = start;
+        start_down_ = false;
+        start_registered_ = RegisterHotKey(nullptr, StartHotkeyId, start_.modifiers | MOD_NOREPEAT, start_.vk) != FALSE;
+        if (!start_registered_)
         {
             const DWORD code = GetLastError();
             if (error)
-                *error = "RegisterHotKey failed win32=" + std::to_string(code);
-            paint_ = previous;
+                *error = "RegisterHotKey start failed win32=" + std::to_string(code);
+            start_ = previous;
             if (previous_registered)
-                paint_registered_ = RegisterHotKey(nullptr, 1, paint_.modifiers | MOD_NOREPEAT, paint_.vk) != FALSE;
+                start_registered_ = RegisterHotKey(nullptr, StartHotkeyId, start_.modifiers | MOD_NOREPEAT, start_.vk) != FALSE;
             return false;
         }
         if (error)
@@ -254,24 +258,108 @@ namespace meccha
         return true;
     }
 
+    auto OverlayHotkeys::set_stop_hotkey(HotkeyBinding stop, std::string* error) -> bool
+    {
+        if (stop_registered_ && stop.vk == stop_.vk && stop.modifiers == stop_.modifiers)
+            return true;
+
+        const HotkeyBinding previous = stop_;
+        const bool previous_registered = stop_registered_;
+        unregister_stop();
+        stop_ = stop;
+        stop_down_ = false;
+        stop_registered_ = RegisterHotKey(nullptr, StopHotkeyId, stop_.modifiers | MOD_NOREPEAT, stop_.vk) != FALSE;
+        if (!stop_registered_)
+        {
+            const DWORD code = GetLastError();
+            if (error)
+                *error = "RegisterHotKey stop failed win32=" + std::to_string(code);
+            stop_ = previous;
+            if (previous_registered)
+                stop_registered_ = RegisterHotKey(nullptr, StopHotkeyId, stop_.modifiers | MOD_NOREPEAT, stop_.vk) != FALSE;
+            return false;
+        }
+        if (error)
+            error->clear();
+        return true;
+    }
+
+    auto OverlayHotkeys::set_hotkeys(HotkeyBinding start, HotkeyBinding stop, std::string* error) -> bool
+    {
+        const HotkeyBinding previous_start = start_;
+        const HotkeyBinding previous_stop = stop_;
+        const bool previous_start_registered = start_registered_;
+        const bool previous_stop_registered = stop_registered_;
+
+        unregister_start();
+        unregister_stop();
+        start_ = start;
+        stop_ = stop;
+        start_down_ = false;
+        stop_down_ = false;
+
+        start_registered_ = RegisterHotKey(nullptr, StartHotkeyId, start_.modifiers | MOD_NOREPEAT, start_.vk) != FALSE;
+        if (!start_registered_)
+        {
+            const DWORD code = GetLastError();
+            if (error)
+                *error = "RegisterHotKey start failed win32=" + std::to_string(code);
+            start_ = previous_start;
+            stop_ = previous_stop;
+            if (previous_start_registered)
+                start_registered_ = RegisterHotKey(nullptr, StartHotkeyId, start_.modifiers | MOD_NOREPEAT, start_.vk) != FALSE;
+            if (previous_stop_registered)
+                stop_registered_ = RegisterHotKey(nullptr, StopHotkeyId, stop_.modifiers | MOD_NOREPEAT, stop_.vk) != FALSE;
+            return false;
+        }
+
+        stop_registered_ = RegisterHotKey(nullptr, StopHotkeyId, stop_.modifiers | MOD_NOREPEAT, stop_.vk) != FALSE;
+        if (!stop_registered_)
+        {
+            const DWORD code = GetLastError();
+            if (error)
+                *error = "RegisterHotKey stop failed win32=" + std::to_string(code);
+            unregister_start();
+            start_ = previous_start;
+            stop_ = previous_stop;
+            if (previous_start_registered)
+                start_registered_ = RegisterHotKey(nullptr, StartHotkeyId, start_.modifiers | MOD_NOREPEAT, start_.vk) != FALSE;
+            if (previous_stop_registered)
+                stop_registered_ = RegisterHotKey(nullptr, StopHotkeyId, stop_.modifiers | MOD_NOREPEAT, stop_.vk) != FALSE;
+            return false;
+        }
+
+        if (error)
+            error->clear();
+        return true;
+    }
+
     auto OverlayHotkeys::backend_json() const -> std::string
     {
-        return hotkey_backend_json(paint_, paint_registered_);
+        return hotkey_backend_json(start_, start_registered_, stop_, stop_registered_);
     }
 
     void OverlayHotkeys::handle_message(const MSG& msg, OverlayHotkeyState& state) const
     {
-        if (msg.message == WM_HOTKEY && msg.wParam == 1)
-            state.paint_requested = true;
+        if (msg.message == WM_HOTKEY && msg.wParam == StartHotkeyId)
+            state.start_requested = true;
+        if (msg.message == WM_HOTKEY && msg.wParam == StopHotkeyId)
+            state.stop_requested = true;
     }
 
     void OverlayHotkeys::poll_fallback(OverlayHotkeyState& state)
     {
-        if (!paint_registered_)
+        if (!start_registered_)
         {
-            const bool down = (GetAsyncKeyState(static_cast<int>(paint_.vk)) & 0x8000) != 0;
-            state.paint_requested = state.paint_requested || (down && !paint_down_);
-            paint_down_ = down;
+            const bool down = (GetAsyncKeyState(static_cast<int>(start_.vk)) & 0x8000) != 0;
+            state.start_requested = state.start_requested || (down && !start_down_);
+            start_down_ = down;
+        }
+        if (!stop_registered_)
+        {
+            const bool down = (GetAsyncKeyState(static_cast<int>(stop_.vk)) & 0x8000) != 0;
+            state.stop_requested = state.stop_requested || (down && !stop_down_);
+            stop_down_ = down;
         }
     }
 }
