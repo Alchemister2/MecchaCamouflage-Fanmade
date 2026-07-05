@@ -58,7 +58,7 @@ public sealed class HostSession
     public async Task<UiSnapshot> GetSnapshotAsync(CancellationToken cancellationToken = default)
     {
         var process = Runtime.FindGameProcess(Settings.GameProcessName);
-        var ping = await Runtime.PingAsync(cancellationToken);
+        var ping = await Runtime.PingAsync(cancellationToken, RuntimeBridgeService.BridgeProbeTimeout);
         var progress = ReadCurrentProgressSnapshot(liveOnly: true);
         var bridgeReady = process is not null &&
             ping.Ok &&
@@ -81,7 +81,7 @@ public sealed class HostSession
         try
         {
             var process = Runtime.FindGameProcess(Settings.GameProcessName);
-            var ping = await Runtime.PingAsync(cancellationToken);
+            var ping = await Runtime.PingAsync(cancellationToken, RuntimeBridgeService.BridgeProbeTimeout);
             if (ping.Ok &&
                 ping.Success &&
                 (process is null || ping.ProcessId is null || ping.ProcessId == process.Id))
@@ -465,6 +465,8 @@ public sealed class HostSession
 
     private static int EffectiveDelay(ProgressSnapshot progress, AppSettings settings)
     {
+        if (progress.AdaptiveBatchEnabled && progress.AdaptiveDelayMs > 0)
+            return progress.AdaptiveDelayMs;
         if (progress.ServerBatchDelayMs > 0)
             return progress.ServerBatchDelayMs;
         return settings.Paint.ServerBatchDelayMs;

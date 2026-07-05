@@ -90,12 +90,12 @@ for ($i = 0; $i -lt $Samples; ++$i) {
     try {
         $parsed = $raw | ConvertFrom-Json
         $meta = $parsed.metadata
-        $componentQueue = [int](MetadataValue $meta "replication_manager_component_queued_count" -1)
-        $globalQueue = [int](MetadataValue $meta "replication_manager_queued_count" -1)
-        $pressureQueue = [int](MetadataValue $meta "replication_queued_stroke_count" -1)
-        $queuedBatches = [int](MetadataValue $meta "replication_queued_batch_count" -1)
-        $maxPerTick = [int](MetadataValue $meta "replication_max_strokes_per_tick" -1)
-        $reportedTicks = [double](MetadataValue $meta "replication_estimated_ticks_to_drain" -1)
+        $componentQueue = [int](MetadataValue $meta "replication_manager_component_queued_count" (MetadataValue $meta "global_replication_manager_component_queued_count" -1))
+        $globalQueue = [int](MetadataValue $meta "replication_manager_queued_count" (MetadataValue $meta "global_replication_manager_queued_count" -1))
+        $pressureQueue = [int](MetadataValue $meta "replication_queued_stroke_count" (MetadataValue $meta "global_replication_queued_stroke_count" -1))
+        $queuedBatches = [int](MetadataValue $meta "replication_queued_batch_count" (MetadataValue $meta "global_replication_queued_batch_count" -1))
+        $maxPerTick = [int](MetadataValue $meta "replication_max_strokes_per_tick" (MetadataValue $meta "global_replication_max_strokes_per_tick" -1))
+        $reportedTicks = [double](MetadataValue $meta "replication_estimated_ticks_to_drain" (MetadataValue $meta "global_replication_estimated_ticks_to_drain" -1))
 
         $queue = $componentQueue
         if ($queue -lt 0) { $queue = $pressureQueue }

@@ -49,8 +49,8 @@ public sealed class BridgeClient
         }
     }
 
-    public Task<BridgeReply> PingAsync(CancellationToken cancellationToken = default) =>
-        RequestAsync("{\"type\":\"ping\"}", cancellationToken, TimeSpan.FromSeconds(2.5));
+    public Task<BridgeReply> PingAsync(CancellationToken cancellationToken = default, TimeSpan? timeoutOverride = null) =>
+        RequestAsync("{\"type\":\"ping\"}", cancellationToken, timeoutOverride ?? TimeSpan.FromSeconds(2.5));
 
     public Task<BridgeReply> CancelPaintAsync(CancellationToken cancellationToken = default) =>
         RequestAsync("{\"type\":\"cancel_paint\"}", cancellationToken, TimeSpan.FromSeconds(5));

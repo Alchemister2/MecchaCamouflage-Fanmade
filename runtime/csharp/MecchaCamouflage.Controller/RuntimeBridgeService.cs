@@ -7,6 +7,7 @@ namespace MecchaCamouflage.Controller;
 public sealed class RuntimeBridgeService
 {
     public const int BridgePort = 50262;
+    public static readonly TimeSpan BridgeProbeTimeout = TimeSpan.FromMilliseconds(300);
     private static readonly int[] BridgePortCandidates = [BridgePort, 50263, 50264, 50265];
 
     private readonly AppPaths paths;
@@ -35,8 +36,8 @@ public sealed class RuntimeBridgeService
         return Process.GetProcessesByName(name).FirstOrDefault();
     }
 
-    public Task<BridgeReply> PingAsync(CancellationToken cancellationToken = default) =>
-        Client(activeBridgePort).PingAsync(cancellationToken);
+    public Task<BridgeReply> PingAsync(CancellationToken cancellationToken = default, TimeSpan? timeoutOverride = null) =>
+        Client(activeBridgePort).PingAsync(cancellationToken, timeoutOverride);
 
     public Task<BridgeReply> CancelPaintAsync(CancellationToken cancellationToken = default) =>
         Client(activeBridgePort).CancelPaintAsync(cancellationToken);
@@ -64,7 +65,7 @@ public sealed class RuntimeBridgeService
         var occupiedPorts = new HashSet<int>();
         foreach (var port in OrderedPortCandidates())
         {
-            var ping = await Client(port).PingAsync(cancellationToken);
+            var ping = await Client(port).PingAsync(cancellationToken, BridgeProbeTimeout);
             if (IsBridgeReadyForProcess(ping, process.Id))
             {
                 activeBridgePort = port;

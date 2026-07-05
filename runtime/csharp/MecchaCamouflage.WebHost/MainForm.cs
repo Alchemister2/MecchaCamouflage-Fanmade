@@ -66,6 +66,7 @@ public sealed class MainForm : Form
             StartBridgeWarmup();
             await PushSnapshotAsync();
         };
+        session.Log.Changed += (_, _) => PushSnapshotFromAnyThread();
         statusTimer.Start();
     }
 
@@ -384,6 +385,24 @@ public sealed class MainForm : Form
             return;
         var snapshot = await session.GetSnapshotAsync();
         PostEvent("snapshotChanged", snapshot);
+    }
+
+    private void PushSnapshotFromAnyThread()
+    {
+        if (IsDisposed || !IsHandleCreated)
+            return;
+        try
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke((MethodInvoker)(async () => await PushSnapshotAsync()));
+                return;
+            }
+            _ = PushSnapshotAsync();
+        }
+        catch (InvalidOperationException)
+        {
+        }
     }
 
     private void PostResponse(string id, bool ok, object? data)
