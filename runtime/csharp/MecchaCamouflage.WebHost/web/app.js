@@ -115,17 +115,16 @@ function renderRuntime(snapshot) {
   const runtime = snapshot.runtime;
   setStatus("footer-process", runtime.process);
   setStatus("footer-bridge", runtime.bridge);
-  text("runtime-progress", `${Math.round(runtime.progressPercent)}%`);
-  text("runtime-eta", runtime.paintEta);
-  text("runtime-elapsed", runtime.paintElapsed);
   text("version", snapshot.version);
-  renderLogs(runtime.logs);
+  renderLogs(runtime);
 }
 
-function renderLogs(logs) {
-  const value = logs || i18n("logs.empty");
+function renderLogs(runtime) {
+  const logs = runtime.logs || "";
+  const value = logs.trim().length > 0 ? logs : "";
   if (activeLogFilter === "all") {
-    setLogHtml(value);
+    const progressLine = buildProgressLine(runtime);
+    setLogHtml([value, progressLine].filter(Boolean).join("\n") || i18n("logs.empty"));
     return;
   }
   const token = `[${activeLogFilter.toUpperCase()}]`;
@@ -134,6 +133,28 @@ function renderLogs(logs) {
     .filter(line => line.toUpperCase().includes(token))
     .join("\n");
   setLogHtml(filtered || i18n("logs.empty.filtered", i18n(`log.${activeLogFilter}`)));
+}
+
+function buildProgressLine(runtime) {
+  if (!runtime.progressVisible) {
+    return "";
+  }
+  const percent = Math.max(0, Math.min(100, Math.round(runtime.progressPercent)));
+  const timingLabel = runtime.timingLabel || "delay";
+  const detail = [
+    `batch ${runtime.batch || "-"}`,
+    `${timingLabel} ${runtime.delay || "-"}`,
+    `queue ${runtime.queue || "-"}`,
+    `ETA ${runtime.paintEta || "-"}`,
+    `elapsed ${runtime.paintElapsed || "-"}`
+  ].join(" | ");
+  return `Paint ${percent}% ${progressBar(percent)} | ${detail}`;
+}
+
+function progressBar(percent) {
+  const width = 16;
+  const filled = Math.max(0, Math.min(width, Math.round((percent / 100) * width)));
+  return `[${"#".repeat(filled)}${"-".repeat(width - filled)}]`;
 }
 
 function setLogHtml(value) {
@@ -149,6 +170,9 @@ function setLogHtml(value) {
 
 function logLineClass(line) {
   const upper = line.toUpperCase();
+  if ((upper.startsWith("PAINT ") || /\[INFO\]\s+PAINT\s+\d+%/.test(upper)) && upper.includes("% [")) {
+    return "log-line progress";
+  }
   if (upper.includes("[ERROR]")) {
     return "log-line error";
   }
@@ -196,6 +220,7 @@ function renderSettings(snapshot) {
   setNumberPair("brush-size", "brush-size-number", paint.brushSizeTexels);
   setNumberPair("stroke-delay", "stroke-delay-number", paint.strokeDelayMs);
   setNumberPair("batch-size", "batch-size-number", paint.serverBatchLimit);
+  setChecked("adaptive-batching", paint.adaptiveBatching);
   setChecked("auto-material", paint.autoMaterial);
   setNumberPair("metallic", "metallic-number", paint.metallic);
   setNumberPair("roughness", "roughness-number", paint.roughness);
@@ -233,6 +258,9 @@ function renderSettings(snapshot) {
   for (const button of document.querySelectorAll(".record-hotkey")) {
     button.disabled = !editing;
   }
+
+  const adaptiveLocked = paint.adaptiveBatching || !editing;
+  setDisabled(["batch-size", "batch-size-number", "stroke-delay", "stroke-delay-number"], adaptiveLocked);
 
   const materialLocked = paint.autoMaterial || !editing;
   setDisabled(["metallic", "metallic-number", "roughness", "roughness-number"], materialLocked);
@@ -426,6 +454,7 @@ function diffSnapshots(before, after) {
     "app.language",
     "paint.brushSizeTexels",
     "paint.strokeDelayMs",
+    "paint.adaptiveBatching",
     "paint.serverBatchLimit",
     "paint.autoMaterial",
     "paint.metallic",
@@ -612,6 +641,7 @@ document.addEventListener("DOMContentLoaded", () => {
   bindRangePair("brush-size", "brush-size-number", "paint.brushSizeTexels");
   bindRangePair("stroke-delay", "stroke-delay-number", "paint.strokeDelayMs", value => Number.parseInt(value, 10));
   bindRangePair("batch-size", "batch-size-number", "paint.serverBatchLimit", value => Number.parseInt(value, 10));
+  bindCheckbox("adaptive-batching", "paint.adaptiveBatching");
   bindCheckbox("auto-material", "paint.autoMaterial");
   bindRangePair("metallic", "metallic-number", "paint.metallic");
   bindRangePair("roughness", "roughness-number", "paint.roughness");
@@ -657,7 +687,7 @@ document.addEventListener("DOMContentLoaded", () => {
       for (const tab of document.querySelectorAll(".tab")) {
         tab.classList.toggle("active", tab === button);
       }
-      renderLogs(liveSnapshot?.runtime?.logs || "");
+      renderLogs(liveSnapshot?.runtime || { logs: "" });
     });
   }
   document.addEventListener("keydown", recordHotkeyFromEvent);

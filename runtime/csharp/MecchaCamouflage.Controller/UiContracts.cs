@@ -20,8 +20,13 @@ public sealed record RuntimeSnapshot(
     double ProgressPercent,
     string PaintEta,
     string PaintElapsed,
+    string Batch,
+    string Delay,
+    string TimingLabel,
+    string Queue,
     string Logs,
-    bool PaintRunning);
+    bool PaintRunning,
+    bool ProgressVisible);
 
 public sealed record SettingsSnapshot(PaintSnapshot Paint, AppSnapshot App);
 
@@ -30,6 +35,7 @@ public sealed record PaintSnapshot(
     double CoverageStepTexels,
     int StrokeDelayMs,
     int ServerBatchLimit,
+    bool AdaptiveBatching,
     bool AutoMaterial,
     double Metallic,
     double Roughness,
@@ -68,8 +74,25 @@ public sealed record ProgressSnapshot(
     int Step,
     int TotalSteps,
     double Progress,
+    int ServerBatchLimit,
+    int ServerBatchDelayMs,
     double PaintEtaMs,
-    double PaintElapsedMs);
+    double PaintElapsedMs,
+    bool AdaptiveBatchEnabled,
+    int AdaptiveRequestedBatchLimit,
+    int AdaptiveResolvedBatchLimit,
+    int AdaptiveRequestedDelayMs,
+    int AdaptiveBatchLimit,
+    int AdaptiveDelayMs,
+    string AdaptivePressureLevel,
+    int AdaptiveBackoffCount,
+    double AdaptiveQueueDrainStrokesPerSec,
+    double AdaptiveSendStrokesPerSec,
+    double AdaptiveModelEtaMs,
+    int ReplicationQueuedBatchCount,
+    int ReplicationQueuedStrokeCount,
+    int ReplicationMaxStrokesPerTick,
+    double ReplicationEstimatedTicksToDrain);
 
 public sealed record HotkeySet(string Start, string Preview, string UnPreview, string Stop)
 {

@@ -448,8 +448,22 @@ public partial class MainWindow : Window
                 Int(root, "step", 0),
                 Int(root, "total_steps", Int(root, "total_strokes", 0)),
                 Number(root, "progress", 0.0),
+                Int(root, "server_batch_limit", -1),
+                Int(root, "server_batch_delay_ms", -1),
                 Number(root, "paint_eta_ms", -1.0),
-                Number(root, "paint_elapsed_ms", Number(root, "elapsed_ms", -1.0)));
+                Number(root, "paint_elapsed_ms", Number(root, "elapsed_ms", -1.0)),
+                Bool(root, "adaptive_batch_enabled", false),
+                Int(root, "adaptive_requested_batch_limit", -1),
+                Int(root, "adaptive_resolved_batch_limit", -1),
+                Int(root, "adaptive_requested_delay_ms", -1),
+                Int(root, "adaptive_batch_limit", -1),
+                Int(root, "adaptive_delay_ms", -1),
+                Text(root, "adaptive_pressure_level", "unknown"),
+                Int(root, "adaptive_backoff_count", 0),
+                Int(root, "replication_queued_batch_count", -1),
+                Int(root, "replication_queued_stroke_count", -1),
+                Int(root, "replication_max_strokes_per_tick", -1),
+                Number(root, "replication_estimated_ticks_to_drain", -1.0));
         }
         catch
         {

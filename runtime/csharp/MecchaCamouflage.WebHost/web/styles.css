@@ -133,7 +133,6 @@ a:hover {
 }
 
 .panel,
-.metric-card,
 .log-panel {
   border: 1px solid var(--hairline);
   border-radius: 2px;
@@ -383,32 +382,6 @@ a:hover {
   padding: 10px 12px;
 }
 
-.metric-row {
-  display: grid;
-  flex: 0 0 auto;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 4px;
-}
-
-.metric-card {
-  display: flex;
-  min-height: 58px;
-  flex-direction: column;
-  justify-content: center;
-  padding: 8px;
-}
-
-.metric-card span {
-  color: var(--muted);
-  font: 700 10px/12px var(--font-mono);
-  text-transform: uppercase;
-}
-
-.metric-card strong {
-  margin-top: 4px;
-  font: 400 12px/18px var(--font-mono);
-}
-
 .log-panel {
   display: flex;
   position: relative;
@@ -479,6 +452,10 @@ a:hover {
 
 .log-line.error {
   color: #ff6b6b;
+}
+
+.log-line.progress {
+  color: var(--primary);
 }
 
 .footer {

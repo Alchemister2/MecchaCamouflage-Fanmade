@@ -29,6 +29,7 @@ public static class BridgePayloadBuilder
                 ["coverage_step_texels"] = paint.CoverageStepTexels,
                 ["side_source_max_uv"] = paint.SideSourceMaxUv,
                 ["front_back_source_max_uv"] = paint.FrontBackSourceMaxUv,
+                ["adaptive_batch_enabled"] = paint.AdaptiveBatching,
                 ["server_batch_limit"] = paint.ServerBatchLimit,
                 ["server_batch_delay_ms"] = paint.ServerBatchDelayMs,
                 ["auto_material"] = paint.AutoMaterial,

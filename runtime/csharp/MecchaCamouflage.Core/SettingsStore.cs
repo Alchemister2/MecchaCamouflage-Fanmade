@@ -55,6 +55,7 @@ public sealed class SettingsStore
         paint.FrontRegionMode = ReadRegionMode(root, "front_region_mode", "enable_front_paint", paint.FrontRegionMode);
         paint.SideRegionMode = ReadRegionMode(root, "side_region_mode", "enable_side_paint", paint.SideRegionMode);
         paint.BackRegionMode = ReadRegionMode(root, "back_region_mode", "enable_back_paint", paint.BackRegionMode);
+        paint.AdaptiveBatching = ReadBool(root, "adaptive_batching", ReadBool(root, "adaptive_batch_enabled", paint.AdaptiveBatching));
         paint.ServerBatchLimit = ReadInt(root, "server_batch_limit", paint.ServerBatchLimit);
         paint.ServerBatchDelayMs = ReadInt(root, "server_batch_delay_ms", paint.ServerBatchDelayMs);
         paint.AutoMaterial = ReadBool(root, "auto_material", ReadBool(root, "auto_material_properties", paint.AutoMaterial));
@@ -139,6 +140,7 @@ public sealed class SettingsStore
         front_region_mode = RegionModeText(settings.Paint.FrontRegionMode),
         side_region_mode = RegionModeText(settings.Paint.SideRegionMode),
         back_region_mode = RegionModeText(settings.Paint.BackRegionMode),
+        adaptive_batching = settings.Paint.AdaptiveBatching,
         server_batch_limit = settings.Paint.ServerBatchLimit,
         server_batch_delay_ms = settings.Paint.ServerBatchDelayMs,
         auto_material = settings.Paint.AutoMaterial,

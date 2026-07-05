@@ -62,6 +62,7 @@ public sealed class MainForm : Form
         Move += (_, _) => PersistWindowSnapshot();
         statusTimer.Tick += async (_, _) =>
         {
+            statusTimer.Interval = session.PaintRunning ? 500 : 2000;
             StartBridgeWarmup();
             await PushSnapshotAsync();
         };
@@ -199,7 +200,7 @@ public sealed class MainForm : Form
                 session.OpenLogs();
                 return new { success = true };
             case "copyLogs":
-                Clipboard.SetText(session.Log.Text);
+                Clipboard.SetText(session.ClipboardLogText());
                 return new { success = true };
             case "setEditing":
                 settingsEditing = command.Payload.GetProperty("editing").GetBoolean();

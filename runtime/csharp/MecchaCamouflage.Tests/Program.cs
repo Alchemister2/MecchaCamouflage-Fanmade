@@ -84,6 +84,7 @@ static void PayloadIncludesFillMaterial()
     Assert(Math.Abs(tuning.GetProperty("fill_color_r").GetDouble() - (241.0 / 255.0)) < 0.00001, "fill red not normalized");
     Assert(tuning.GetProperty("enable_front_paint").GetBoolean() == false, "compat front bool wrong");
     Assert(tuning.GetProperty("enable_back_paint").GetBoolean(), "compat back bool wrong");
+    Assert(tuning.GetProperty("adaptive_batch_enabled").GetBoolean(), "adaptive batching should be enabled by default");
 }
 
 static void LocalesHaveCompleteKeys()
@@ -197,6 +198,7 @@ static void UiSnapshotSerializesServerBatchLimit()
         6.0,
         150,
         50,
+        true,
         false,
         0.0,
         1.0,
@@ -215,6 +217,8 @@ static void UiSnapshotSerializesServerBatchLimit()
 
     Assert(doc.RootElement.TryGetProperty("serverBatchLimit", out var serverBatchLimit), "snapshot should expose serverBatchLimit for app.js");
     Assert(serverBatchLimit.GetInt32() == 50, "serverBatchLimit should carry the configured value");
+    Assert(doc.RootElement.TryGetProperty("adaptiveBatching", out var adaptiveBatching), "snapshot should expose adaptiveBatching for app.js");
+    Assert(adaptiveBatching.GetBoolean(), "adaptiveBatching should carry the configured value");
     Assert(!doc.RootElement.TryGetProperty("batchSize", out _), "snapshot should not expose renamed batchSize");
 }
 

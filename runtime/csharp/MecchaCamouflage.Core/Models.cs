@@ -44,6 +44,7 @@ public sealed class PaintSettings
     public RegionMode FrontRegionMode { get; set; } = RegionMode.Fill;
     public RegionMode SideRegionMode { get; set; } = RegionMode.Paint;
     public RegionMode BackRegionMode { get; set; } = RegionMode.Paint;
+    public bool AdaptiveBatching { get; set; } = true;
     public int ServerBatchLimit { get; set; } = 50;
     public int ServerBatchDelayMs { get; set; } = 150;
     public bool AutoMaterial { get; set; } = false;

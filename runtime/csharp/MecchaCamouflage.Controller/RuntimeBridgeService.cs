@@ -132,6 +132,7 @@ public sealed class RuntimeBridgeService
                 log.Error($"Bridge injection failed ({injector.ExitCode}): {FriendlyInjectorFailure(injector.ExitCode, stderr)}");
                 return false;
             }
+            log.Info("Bridge injection completed.");
         }
         catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or System.ComponentModel.Win32Exception)
         {

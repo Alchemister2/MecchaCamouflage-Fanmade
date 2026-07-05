@@ -10,6 +10,7 @@ public sealed class HostSession
     [
         "paint.brushSizeTexels",
         "paint.coverageStepTexels",
+        "paint.adaptiveBatching",
         "paint.serverBatchLimit",
         "paint.strokeDelayMs",
         "paint.autoMaterial",
@@ -50,12 +51,15 @@ public sealed class HostSession
     public bool PaintRunning { get; private set; }
     private readonly SemaphoreSlim bridgeWarmupGate = new(1, 1);
     private DateTimeOffset nextBridgeWarmupAttempt;
+    private DateTimeOffset currentPaintStartedAt = DateTimeOffset.MinValue;
+    private bool finalProgressLogged;
+    private bool currentProgressIsServerPaint;
 
     public async Task<UiSnapshot> GetSnapshotAsync(CancellationToken cancellationToken = default)
     {
         var process = Runtime.FindGameProcess(Settings.GameProcessName);
         var ping = await Runtime.PingAsync(cancellationToken);
-        var progress = ReadProgressSnapshot(Runtime.ProgressPath);
+        var progress = ReadCurrentProgressSnapshot(liveOnly: true);
         var bridgeReady = process is not null &&
             ping.Ok &&
             ping.Success &&
@@ -229,6 +233,10 @@ public sealed class HostSession
         if (PaintRunning)
             return new HostCommandResult(false, "Paint is already running.");
         PaintRunning = true;
+        currentPaintStartedAt = DateTimeOffset.UtcNow;
+        currentProgressIsServerPaint = !previewOnly && !unpreviewOnly;
+        finalProgressLogged = false;
+        TryDeleteProgressSnapshot();
         try
         {
             var ready = await Runtime.EnsureReadyAsync(Settings.GameProcessName, cancellationToken);
@@ -248,17 +256,21 @@ public sealed class HostSession
                 new PaintRequestOptions(previewOnly, unpreviewOnly, Environment.GetEnvironmentVariable("MECCHA_RESEARCH_ARTIFACTS") == "1"));
             var response = await Runtime.SendPaintAsync(payload, cancellationToken);
             var message = FriendlyBridgeMessage(response.Message.Length > 0 ? response.Message : response.Stage);
+            LogFinalProgressOnce();
             if (response.Success)
             {
                 Log.Info(message);
                 return new HostCommandResult(true, message);
             }
+            if (message == "Paint canceled.")
+                return new HostCommandResult(false, message);
             Log.Error(message);
             return new HostCommandResult(false, message);
         }
         finally
         {
             PaintRunning = false;
+            currentProgressIsServerPaint = false;
         }
     }
 
@@ -266,6 +278,7 @@ public sealed class HostSession
     {
         var response = await Runtime.CancelPaintAsync(cancellationToken);
         var message = FriendlyBridgeMessage(response.Message.Length > 0 ? response.Message : response.Stage);
+        LogFinalProgressOnce();
         Log.Info(response.Success ? "Paint canceled." : "Paint cancel failed: " + message);
         PaintRunning = false;
         return new HostCommandResult(response.Success, response.Success ? "Paint canceled." : message);
@@ -275,6 +288,21 @@ public sealed class HostSession
     {
         Directory.CreateDirectory(Paths.LogDirectory);
         Process.Start(new ProcessStartInfo(Paths.LogDirectory) { UseShellExecute = true });
+    }
+
+    public string ClipboardLogText()
+    {
+        if (!currentProgressIsServerPaint)
+            return Log.Text;
+        var progress = ReadCurrentProgressSnapshot(liveOnly: false);
+        if (progress is null)
+            return Log.Text;
+        var line = FormatProgressLogLine(progress);
+        if (line.Length == 0)
+            return Log.Text;
+        return string.IsNullOrWhiteSpace(Log.Text)
+            ? line
+            : Log.Text.TrimEnd() + Environment.NewLine + line;
     }
 
     public async Task ShutdownBridgeAsync()
@@ -346,19 +374,27 @@ public sealed class HostSession
         var percent = 0.0;
         var eta = "-";
         var elapsed = "-";
+        var batch = "-";
+        var delay = "-";
+        var timingLabel = "delay";
+        var queue = "-";
         if (progress is not null)
         {
             percent = progress.TotalSteps > 0
                 ? Math.Clamp(progress.Step * 100.0 / progress.TotalSteps, 0.0, 100.0)
                 : Math.Clamp(progress.Progress * 100.0, 0.0, 100.0);
-            eta = FormatDuration(progress.PaintEtaMs);
+            eta = FormatEta(progress);
             elapsed = FormatDuration(progress.PaintElapsedMs);
+            batch = FormatBatch(progress, Settings);
+            delay = FormatDelay(progress, Settings);
+            timingLabel = TimingLabel(progress);
+            queue = FormatQueue(progress);
         }
 
         return new UiSnapshot(
             VersionInfo.Current,
             Settings.Language,
-            new RuntimeSnapshot(process, bridge, service, percent, eta, elapsed, Log.Text, PaintRunning),
+            new RuntimeSnapshot(process, bridge, service, percent, eta, elapsed, batch, delay, timingLabel, queue, Log.Text, PaintRunning, progress is not null),
             ToSnapshot(Settings),
             ToSnapshot(defaults),
             BuildResetSnapshot(Settings, defaults),
@@ -375,6 +411,7 @@ public sealed class HostSession
                 paint.CoverageStepTexels,
                 paint.ServerBatchDelayMs,
                 paint.ServerBatchLimit,
+                paint.AdaptiveBatching,
                 paint.AutoMaterial,
                 paint.Metallic,
                 paint.Roughness,
@@ -396,13 +433,65 @@ public sealed class HostSession
                 settings.StopHotkey));
     }
 
+    private static string FormatBatch(ProgressSnapshot progress, AppSettings settings)
+    {
+        var effectiveBatch = EffectiveBatch(progress, settings);
+        if (progress.AdaptiveBatchEnabled && effectiveBatch > 0)
+        {
+            var max = progress.AdaptiveResolvedBatchLimit > 0 ? progress.AdaptiveResolvedBatchLimit : progress.AdaptiveRequestedBatchLimit;
+            return max > 0 ? $"{effectiveBatch}/{max}" : effectiveBatch.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+        var batch = effectiveBatch;
+        return batch > 0 ? batch.ToString(System.Globalization.CultureInfo.InvariantCulture) : "-";
+    }
+
+    private static string FormatDelay(ProgressSnapshot progress, AppSettings settings)
+    {
+        var delay = EffectiveDelay(progress, settings);
+        return delay >= 0 ? $"{delay}ms" : "-";
+    }
+
+    private static string TimingLabel(ProgressSnapshot progress) =>
+        progress.AdaptiveBatchEnabled ? "pacing" : "delay";
+
+    private static int EffectiveBatch(ProgressSnapshot progress, AppSettings settings)
+    {
+        if (progress.AdaptiveBatchEnabled && progress.AdaptiveBatchLimit > 0)
+            return progress.AdaptiveBatchLimit;
+        if (progress.ServerBatchLimit > 0)
+            return progress.ServerBatchLimit;
+        return settings.Paint.ServerBatchLimit;
+    }
+
+    private static int EffectiveDelay(ProgressSnapshot progress, AppSettings settings)
+    {
+        if (progress.ServerBatchDelayMs > 0)
+            return progress.ServerBatchDelayMs;
+        return settings.Paint.ServerBatchDelayMs;
+    }
+
+    private static string FormatQueue(ProgressSnapshot progress)
+    {
+        if (progress.ReplicationQueuedStrokeCount < 0)
+            return "-";
+        var strokes = progress.ReplicationQueuedStrokeCount == 1 ? "stroke" : "strokes";
+        if (progress.AdaptiveQueueDrainStrokesPerSec > 0.0 && double.IsFinite(progress.AdaptiveQueueDrainStrokesPerSec))
+        {
+            var drain = progress.AdaptiveQueueDrainStrokesPerSec >= 10.0
+                ? Math.Round(progress.AdaptiveQueueDrainStrokesPerSec).ToString(System.Globalization.CultureInfo.InvariantCulture)
+                : Math.Round(progress.AdaptiveQueueDrainStrokesPerSec, 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return $"{progress.ReplicationQueuedStrokeCount} {strokes} (drain {drain}/s)";
+        }
+        return $"{progress.ReplicationQueuedStrokeCount} {strokes}";
+    }
+
     private static ResetSnapshot BuildResetSnapshot(AppSettings settings, AppSettings defaults)
     {
         var map = ResetKeys.ToDictionary(key => key, key => !SettingEquals(settings, defaults, key), StringComparer.OrdinalIgnoreCase);
         var sections = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase)
         {
             ["paint.geometry"] = map["paint.brushSizeTexels"] || map["paint.coverageStepTexels"] ||
-                                  map["paint.serverBatchLimit"] || map["paint.strokeDelayMs"],
+                                  map["paint.adaptiveBatching"] || map["paint.serverBatchLimit"] || map["paint.strokeDelayMs"],
             ["paint.material"] = map["paint.autoMaterial"] || map["paint.metallic"] || map["paint.roughness"],
             ["regions"] = map["paint.frontRegionMode"] || map["paint.sideRegionMode"] || map["paint.backRegionMode"],
             ["fill.material"] = map["paint.fillColor"] || map["paint.fillMetallic"] || map["paint.fillRoughness"],
@@ -416,6 +505,7 @@ public sealed class HostSession
     {
         "paint.brushSizeTexels" => Nearly(left.Paint.StrokeSizeTexels, right.Paint.StrokeSizeTexels),
         "paint.coverageStepTexels" => Nearly(left.Paint.CoverageStepTexels, right.Paint.CoverageStepTexels),
+        "paint.adaptiveBatching" => left.Paint.AdaptiveBatching == right.Paint.AdaptiveBatching,
         "paint.serverBatchLimit" => left.Paint.ServerBatchLimit == right.Paint.ServerBatchLimit,
         "paint.strokeDelayMs" => left.Paint.ServerBatchDelayMs == right.Paint.ServerBatchDelayMs,
         "paint.autoMaterial" => left.Paint.AutoMaterial == right.Paint.AutoMaterial,
@@ -448,6 +538,7 @@ public sealed class HostSession
                 settings.Paint.CoverageStepTexels = defaults.Paint.StrokeSizeTexels;
                 break;
             case "paint.strokeDelayMs": settings.Paint.ServerBatchDelayMs = defaults.Paint.ServerBatchDelayMs; break;
+            case "paint.adaptiveBatching": settings.Paint.AdaptiveBatching = defaults.Paint.AdaptiveBatching; break;
             case "paint.serverBatchLimit": settings.Paint.ServerBatchLimit = defaults.Paint.ServerBatchLimit; break;
             case "paint.autoMaterial": settings.Paint.AutoMaterial = defaults.Paint.AutoMaterial; break;
             case "paint.metallic": settings.Paint.Metallic = defaults.Paint.Metallic; break;
@@ -480,6 +571,7 @@ public sealed class HostSession
                 settings.Paint.CoverageStepTexels = settings.Paint.StrokeSizeTexels;
                 break;
             case "paint.strokeDelayMs": settings.Paint.ServerBatchDelayMs = value.GetInt32(); break;
+            case "paint.adaptiveBatching": settings.Paint.AdaptiveBatching = value.GetBoolean(); break;
             case "paint.serverBatchLimit": settings.Paint.ServerBatchLimit = value.GetInt32(); break;
             case "paint.autoMaterial": settings.Paint.AutoMaterial = value.GetBoolean(); break;
             case "paint.metallic": settings.Paint.Metallic = value.GetDouble(); break;
@@ -518,12 +610,76 @@ public sealed class HostSession
         throw new ArgumentException("Region mode must be paint, fill, or skip.");
     }
 
-    private static ProgressSnapshot? ReadProgressSnapshot(string path)
+    private void TryDeleteProgressSnapshot()
     {
+        try
+        {
+            var path = Runtime.ProgressPath;
+            if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
+                File.Delete(path);
+        }
+        catch
+        {
+            // Best-effort cleanup only; stale progress is still rejected by timestamp.
+        }
+    }
+
+    private ProgressSnapshot? ReadCurrentProgressSnapshot(bool liveOnly)
+    {
+        var progress = ReadProgressSnapshot(Runtime.ProgressPath, out var writeTime);
+        if (progress is null)
+            return null;
+        if (currentPaintStartedAt == DateTimeOffset.MinValue)
+            return null;
+        if (writeTime < currentPaintStartedAt.AddSeconds(-1))
+            return null;
+        if (liveOnly && !PaintRunning)
+            return null;
+        if (liveOnly && !currentProgressIsServerPaint)
+            return null;
+        return progress;
+    }
+
+    private void LogFinalProgressOnce()
+    {
+        if (!currentProgressIsServerPaint)
+            return;
+        if (finalProgressLogged)
+            return;
+        var progress = ReadCurrentProgressSnapshot(liveOnly: false);
+        if (progress is null)
+            return;
+        var line = FormatProgressLogLine(progress);
+        if (line.Length == 0)
+            return;
+        finalProgressLogged = true;
+        Log.Info(line);
+    }
+
+    private string FormatProgressLogLine(ProgressSnapshot progress)
+    {
+        var percent = progress.TotalSteps > 0
+            ? Math.Clamp(progress.Step * 100.0 / progress.TotalSteps, 0.0, 100.0)
+            : Math.Clamp(progress.Progress * 100.0, 0.0, 100.0);
+        var rounded = (int)Math.Round(percent);
+        return $"Paint {rounded}% {ProgressBar(rounded)} | batch {FormatBatch(progress, Settings)} | {TimingLabel(progress)} {FormatDelay(progress, Settings)} | queue {FormatQueue(progress)} | ETA {FormatEta(progress)} | elapsed {FormatDuration(progress.PaintElapsedMs)}";
+    }
+
+    private static string ProgressBar(int percent)
+    {
+        const int width = 16;
+        var filled = Math.Clamp((int)Math.Round((percent / 100.0) * width), 0, width);
+        return "[" + new string('#', filled) + new string('-', width - filled) + "]";
+    }
+
+    private static ProgressSnapshot? ReadProgressSnapshot(string path, out DateTimeOffset writeTime)
+    {
+        writeTime = DateTimeOffset.MinValue;
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
             return null;
         try
         {
+            writeTime = File.GetLastWriteTimeUtc(path);
             using var doc = JsonDocument.Parse(File.ReadAllText(path));
             var root = doc.RootElement;
             return new ProgressSnapshot(
@@ -533,8 +689,25 @@ public sealed class HostSession
                 Int(root, "step", 0),
                 Int(root, "total_steps", Int(root, "total_strokes", 0)),
                 Number(root, "progress", 0.0),
+                Int(root, "server_batch_limit", -1),
+                Int(root, "server_batch_delay_ms", -1),
                 Number(root, "paint_eta_ms", -1.0),
-                Number(root, "paint_elapsed_ms", Number(root, "elapsed_ms", -1.0)));
+                Number(root, "paint_elapsed_ms", Number(root, "elapsed_ms", -1.0)),
+                Bool(root, "adaptive_batch_enabled", false),
+                Int(root, "adaptive_requested_batch_limit", -1),
+                Int(root, "adaptive_resolved_batch_limit", -1),
+                Int(root, "adaptive_requested_delay_ms", -1),
+                Int(root, "adaptive_batch_limit", -1),
+                Int(root, "adaptive_delay_ms", -1),
+                Text(root, "adaptive_pressure_level", "unknown"),
+                Int(root, "adaptive_backoff_count", 0),
+                Number(root, "adaptive_queue_drain_strokes_per_sec", -1.0),
+                Number(root, "adaptive_send_strokes_per_sec", -1.0),
+                Number(root, "adaptive_model_eta_ms", -1.0),
+                Int(root, "replication_queued_batch_count", -1),
+                Int(root, "replication_queued_stroke_count", -1),
+                Int(root, "replication_max_strokes_per_tick", -1),
+                Number(root, "replication_estimated_ticks_to_drain", -1.0));
         }
         catch
         {
@@ -547,7 +720,7 @@ public sealed class HostSession
         if (!double.IsFinite(milliseconds) || milliseconds < 0.0)
             return "-";
         if (milliseconds < 1000.0)
-            return "<1s";
+            return "0s";
         var totalSeconds = (int)Math.Round(milliseconds / 1000.0);
         if (totalSeconds < 60)
             return totalSeconds + "s";
@@ -558,6 +731,14 @@ public sealed class HostSession
         var hours = minutes / 60;
         minutes %= 60;
         return $"{hours}h {minutes:00}m";
+    }
+
+    private static string FormatEta(ProgressSnapshot progress)
+    {
+        if (progress.Terminal)
+            return string.Equals(progress.Result, "done", StringComparison.OrdinalIgnoreCase) ? "0s" : "-";
+
+        return FormatDuration(progress.PaintEtaMs);
     }
 
     private static string Text(JsonElement root, string key, string fallback) =>
