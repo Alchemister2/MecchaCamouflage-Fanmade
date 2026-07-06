@@ -40,7 +40,6 @@ public sealed class HostSession
         Settings = Store.Load();
         Log = new RuntimeLog(Paths);
         Runtime = new RuntimeBridgeService(Paths, Log);
-        Log.Info("GUI: initialized.");
     }
 
     public LocalizationCatalog Localization { get; } = LocalizationCatalog.Load();

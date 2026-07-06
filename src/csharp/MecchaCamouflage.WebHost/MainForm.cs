@@ -25,6 +25,7 @@ public sealed class MainForm : Form
     private readonly WebView2 webView = new() { Dock = DockStyle.Fill };
     private readonly System.Windows.Forms.Timer statusTimer = new() { Interval = 2000 };
     private bool webReady;
+    private bool guiInitializedLogged;
     private bool settingsEditing;
     private bool hotkeyRecording;
 
@@ -123,7 +124,7 @@ public sealed class MainForm : Form
             throw new DirectoryNotFoundException("Packaged web assets are missing: " + runtime.WebRoot);
 
         webView.CoreWebView2.WebMessageReceived += async (_, args) => await HandleWebMessageAsync(args);
-        webView.CoreWebView2.NavigationCompleted += (_, _) => ApplyWindowSettings();
+        webView.CoreWebView2.NavigationCompleted += HandleNavigationCompleted;
         webView.CoreWebView2.NavigationStarting += (_, args) => HandleNavigationStarting(args);
         webView.CoreWebView2.NewWindowRequested += (_, args) => HandleNewWindowRequested(args);
         webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
@@ -137,8 +138,30 @@ public sealed class MainForm : Form
             string.Equals(Environment.GetEnvironmentVariable("MECCHA_RESEARCH_ARTIFACTS"), "1", StringComparison.Ordinal);
         webView.CoreWebView2.Navigate("https://meccha.localhost/index.html");
         webReady = true;
-        await PushSnapshotAsync();
         StartBridgeWarmup();
+    }
+
+    private async void HandleNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs args)
+    {
+        try
+        {
+            ApplyWindowSettings();
+            if (!args.IsSuccess)
+            {
+                session.Log.Error($"GUI: failed to load web assets ({args.WebErrorStatus}).");
+                return;
+            }
+            if (guiInitializedLogged)
+                return;
+            guiInitializedLogged = true;
+            session.Log.Info("GUI: initialized.");
+            await PushSnapshotAsync();
+        }
+        catch (Exception ex)
+        {
+            DiagnosticsState.RecordException("gui_navigation_completed_failed", ex);
+            session.Log.Error(ex.Message);
+        }
     }
 
     private WebRuntimeInfo PrepareFixedWebRuntime()
