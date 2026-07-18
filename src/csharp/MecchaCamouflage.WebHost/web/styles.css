@@ -133,10 +133,17 @@ input[type="checkbox"] {
 
 input.theme-visible-readonly[type="range"],
 input.theme-visible-readonly[type="checkbox"] {
-  opacity: 1;
   accent-color: var(--primary);
   cursor: default;
   pointer-events: none;
+}
+
+input.theme-visible-readonly[type="range"] {
+  opacity: 0.55;
+}
+
+input.theme-visible-readonly[type="checkbox"] {
+  opacity: 1;
 }
 
 a {
@@ -252,12 +259,14 @@ body.editing .group-title {
 }
 
 .field > span,
+.brush-toggle > span,
 .hotkey-row > span {
   color: var(--muted);
   font: 700 12px/14px var(--font-mono);
 }
 
 body.editing .field > span,
+body.editing .brush-toggle > span,
 body.editing .hotkey-row > span {
   color: var(--text);
 }
@@ -279,10 +288,6 @@ body.editing .hotkey-row > span {
   color: var(--text);
   font: 700 12px/17px var(--font-mono);
   text-align: right;
-}
-
-.reverse-range {
-  direction: rtl;
 }
 
 .select-wrap {
@@ -404,6 +409,20 @@ body.editing #fill-section.disabled .field > span {
 
 .setting-grid > .app-wide {
   grid-column: 1 / -1;
+}
+
+.brush-setting-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.45fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+}
+
+.brush-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
 }
 
 .hotkey-list {

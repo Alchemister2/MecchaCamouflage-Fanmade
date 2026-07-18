@@ -73,9 +73,9 @@ helper still needed for issue triage.
 - `ServerPackedPaintBatch` default route, packed payload layout, and validated
   internal anti-echo local apply.
 - Packed mesh-anchor radius units: UV radius and effective world radius are
-  distinct fields. Production calibrates the normalized radius from the
-  validated runtime mesh/local-UV scale and live bounds, then uses a
-  non-positive world-radius sentinel for receiver-side conversion.
+  distinct fields. Production keeps the packed-wire scale at `1.0` and derives
+  one effective world radius per anchor triangle from its UV-to-world Jacobian.
+  Uniform scale and mesh-average calibration are research-only.
 - Packed effective subdivision fields are level/pixel-size/template-resolution,
   not diameter metadata; production sends all-zero native-preflight sentinels.
 - Async paint lifecycle, queue draining, cancellation, and pawn/component guards.

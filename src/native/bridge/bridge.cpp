@@ -51,9 +51,9 @@ namespace
     constexpr int AutoEventWatchSampleBytes = 8192;
     constexpr UINT PaintDispatchMessage = WM_APP + 0x4D43;
     constexpr int PackedReplicationDefaultBatchLimit = 20;
-    constexpr int PackedReplicationMaxBatchLimit = 20;
+    constexpr int PackedReplicationMaxBatchLimit = 500;
     constexpr int PackedReplicationDefaultPacingMs = 50;
-    constexpr int PackedReplicationMinPacingMs = 50;
+    constexpr int PackedReplicationMinPacingMs = 1;
     constexpr int PackedReplicationFallbackMaxStrokesPerTick = 24;
     constexpr int PackedReplicationResolvedPacingMinMs = 1;
     constexpr int PackedReplicationBatchSize = 20;
@@ -7056,8 +7056,6 @@ namespace
         double barycentric_c{1.0 / 3.0};
         sdk::FVector local_position{};
         sdk::FVector world_position{};
-        sdk::FVector reference_position{};
-        bool reference_position_available{false};
         double facing_dot{0.0};
         double uv_area{0.0};
         int uv_island{-1};
@@ -7961,8 +7959,6 @@ namespace
 
     auto mesh_first_emit_runtime_triangle_sample(std::vector<MeshFirstPlanSample>& samples,
                                                  const MeshFirstRuntimeTriangle& triangle,
-                                                 const sdk::FVector (&reference_triangle)[3],
-                                                 bool reference_position_available,
                                                  const MeshFirstProfile::TriangleMeta& meta,
                                                  int triangle_index,
                                                  MeshFirstRegion region,
@@ -7986,12 +7982,6 @@ namespace
         sample.barycentric_c = c;
         sample.local_position = sdk_vec_add(sdk_vec_add(sdk_vec_mul(triangle.local[0], a), sdk_vec_mul(triangle.local[1], b)), sdk_vec_mul(triangle.local[2], c));
         sample.world_position = sdk_vec_add(sdk_vec_add(sdk_vec_mul(triangle.world[0], a), sdk_vec_mul(triangle.world[1], b)), sdk_vec_mul(triangle.world[2], c));
-        sample.reference_position = sdk_vec_add(
-            sdk_vec_add(sdk_vec_mul(reference_triangle[0], a),
-                        sdk_vec_mul(reference_triangle[1], b)),
-            sdk_vec_mul(reference_triangle[2], c));
-        sample.reference_position_available = reference_position_available &&
-                                              mesh_first_finite_vector(sample.reference_position);
         sample.uv_island = meta.uv_island;
         sample.dominant_bone = meta.dominant_bone;
         sample.body_region = meta.body_region;
@@ -8067,19 +8057,6 @@ namespace
             {
                 ++stats.invalid_triangles;
                 continue;
-            }
-            sdk::FVector reference_triangle[3]{triangle.local[0], triangle.local[1], triangle.local[2]};
-            bool reference_position_available = false;
-            if (profile)
-            {
-                reference_position_available = true;
-                for (int vertex_slot = 0; vertex_slot < 3; ++vertex_slot)
-                {
-                    const int vertex_index = profile->indices[index_base + static_cast<std::size_t>(vertex_slot)];
-                    reference_triangle[vertex_slot] = profile->vertices[static_cast<std::size_t>(vertex_index)].position;
-                    reference_position_available = reference_position_available &&
-                                                   mesh_first_finite_vector(reference_triangle[vertex_slot]);
-                }
             }
             const auto world_normal = sdk_vec_normalize(sdk_vec_cross(sdk_vec_sub(triangle.world[1], triangle.world[0]),
                                                                       sdk_vec_sub(triangle.world[2], triangle.world[0])));
@@ -8157,8 +8134,6 @@ namespace
                     }
                     mesh_first_emit_runtime_triangle_sample(samples,
                                                             triangle,
-                                                            reference_triangle,
-                                                            reference_position_available,
                                                             meta,
                                                             static_cast<int>(tri),
                                                             region,
@@ -8175,8 +8150,6 @@ namespace
             {
                 mesh_first_emit_runtime_triangle_sample(samples,
                                                         triangle,
-                                                        reference_triangle,
-                                                        reference_position_available,
                                                         meta,
                                                         static_cast<int>(tri),
                                                         region,
@@ -9304,6 +9277,8 @@ namespace
         std::uintptr_t local_packed_queue_manager_enqueue{0};
         std::uintptr_t local_packed_queue_component_context_resolver{0};
         std::uintptr_t local_packed_queue_manager_resolver{0};
+        bool server_packed_fallback{false};
+        std::string server_packed_fallback_reason{};
         sdk::FGuid local_packed_queue_source_id{};
         int local_packed_queue_calls_returned{0};
         int local_packed_queue_call_exceptions{0};
@@ -10805,6 +10780,16 @@ namespace
         out += ",\"local_visual_sync_elapsed_ms\":" + std::to_string(local_elapsed_ms);
         out += ",\"local_elapsed_ms\":" + std::to_string(local_elapsed_ms);
         out += ",\"local_eta_ms\":" + std::to_string(local_eta_ms);
+        if (job && job->server_packed_fallback)
+        {
+            out += ",\"local_route_mode\":\"server_packed_fallback\"";
+            out += ",\"fallback_reason\":\"" +
+                   json_escape(job->server_packed_fallback_reason) + "\"";
+            out += ",\"fallback_batch_limit\":" +
+                   std::to_string(runtime_contract::ServerPackedFallbackBatchLimit);
+            out += ",\"fallback_pacing_ms\":" +
+                   std::to_string(runtime_contract::ServerPackedFallbackPacingMs);
+        }
         if (job && job->local_packed_queue_enabled)
         {
             out += ",\"local_packed_queue_resolver_status\":\"" +
@@ -10894,12 +10879,6 @@ namespace
         const bool any_paint_region = enable_front || enable_side || enable_back;
         const bool preview_only = json_bool_field(request, "preview_only", false);
         const bool unpreview_only = json_bool_field(request, "unpreview_only", false);
-        const double requested_brush_pipeline_version =
-            json_number_field(request, "brush_pipeline_version", 0.0);
-        const auto brush_pipeline_version = runtime_contract::resolve_brush_pipeline_version(
-            requested_brush_pipeline_version,
-            preview_only,
-            unpreview_only);
         const bool research_artifacts = json_bool_field(request, "research_artifacts", false);
         const std::string requested_research_route_mode =
             research_artifacts ? lower_copy(json_string_field(request, "research_route_mode", "combined")) : "combined";
@@ -10926,25 +10905,31 @@ namespace
             research_artifacts && json_bool_field(request, "research_uv_replay_atlas", false);
         const bool normal_paint_requires_packed = !preview_only && !unpreview_only && !research_local_only;
         const bool local_visual_sync_requested = !preview_only && !unpreview_only && !research_packed_only;
-        const bool use_packed_local_queue = normal_paint_requires_packed &&
-                                            local_visual_sync_requested &&
-                                            (research_packed_local_queue || !research_artifacts);
+        bool use_packed_local_queue = normal_paint_requires_packed &&
+                                      local_visual_sync_requested &&
+                                      (research_packed_local_queue || !research_artifacts);
+        bool local_visual_sync_enabled = local_visual_sync_requested;
+        bool server_packed_fallback = false;
+        std::string server_packed_fallback_reason{};
         const bool use_internal_no_resend_local_apply = runtime_contract::requires_internal_no_resend(
             preview_only,
             unpreview_only,
             research_local_only,
             research_packed_only) &&
             !use_packed_local_queue;
-        const double legacy_stroke_size_texels =
-            clamp_range(json_number_field(request, "stroke_size_texels", 10.0), 1.0, 20.0);
+        const bool tuning_brush_1_enabled =
+            json_bool_field(request, "brush_1_enabled", false);
         const double tuning_brush_1_size_texels =
-            clamp_range(json_number_field(request, "brush_1_size_texels", 30.0), 10.0, 30.0);
+            clamp_range(json_number_field(request, "brush_1_size_texels", 25.0), 10.0, 50.0);
+        const bool tuning_brush_2_enabled =
+            json_bool_field(request, "brush_2_enabled", true);
         const double tuning_brush_2_size_texels =
-            clamp_range(json_number_field(request,
-                                          "brush_2_size_texels",
-                                          legacy_stroke_size_texels),
-                        5.0,
-                        10.0);
+            clamp_range(json_number_field(request, "brush_2_size_texels", 5.0), 1.0, 10.0);
+        const double tuning_coverage_step_texels =
+            tuning_brush_1_enabled && tuning_brush_2_enabled
+                ? std::min(tuning_brush_1_size_texels, tuning_brush_2_size_texels)
+                : (tuning_brush_1_enabled ? tuning_brush_1_size_texels
+                                          : tuning_brush_2_size_texels);
         const double tuning_side_source_max_uv = clamp_range(json_number_field(request, "side_source_max_uv", 0.08), 0.001, 0.50);
         const double tuning_front_back_source_max_uv = clamp_range(json_number_field(request, "front_back_source_max_uv", 0.45), 0.001, 2.00);
         const bool tuning_auto_material = json_bool_field(request, "auto_material", false);
@@ -11068,20 +11053,16 @@ namespace
         metadata += ",\"server_batch_rpc_requested\":\"" + json_escape(requested_server_batch_rpc) + "\"";
         metadata += ",\"packed_route_requested_valid\":" + std::string(json_bool(packed_route_requested));
         metadata += ",\"packed_route_requested\":\"" + json_escape(requested_packed_route) + "\"";
-        metadata += ",\"brush_pipeline\":\"fill_coarse_paint_fine_paint\"";
-        metadata += ",\"brush_pipeline_version_requested\":" +
-                    std::to_string(brush_pipeline_version.requested_version);
-        metadata += ",\"brush_pipeline_version_supported\":" +
-                    std::string(json_bool(brush_pipeline_version.supported));
-        metadata += ",\"brush_pipeline_version_required\":" +
-                    std::string(json_bool(brush_pipeline_version.required));
-        metadata += ",\"brush_pipeline_supported_version\":" +
-                    std::to_string(brush_pipeline_version.supported_version);
+        metadata += ",\"brush_pipeline\":\"" +
+                    std::string(tuning_brush_1_enabled && tuning_brush_2_enabled
+                                    ? "fill_brush_1_brush_2"
+                                    : (tuning_brush_1_enabled ? "fill_brush_1" : "fill_brush_2")) +
+                    "\"";
+        metadata += ",\"brush_1_enabled\":" + std::string(json_bool(tuning_brush_1_enabled));
         metadata += ",\"brush_1_size_texels\":" + std::to_string(tuning_brush_1_size_texels);
+        metadata += ",\"brush_2_enabled\":" + std::string(json_bool(tuning_brush_2_enabled));
         metadata += ",\"brush_2_size_texels\":" + std::to_string(tuning_brush_2_size_texels);
-        metadata += ",\"legacy_stroke_size_texels\":" + std::to_string(legacy_stroke_size_texels);
-        metadata += ",\"stroke_size_texels\":" + std::to_string(tuning_brush_2_size_texels);
-        metadata += ",\"coverage_step_texels\":" + std::to_string(tuning_brush_2_size_texels);
+        metadata += ",\"coverage_step_texels\":" + std::to_string(tuning_coverage_step_texels);
         metadata += ",\"side_source_max_uv\":" + std::to_string(tuning_side_source_max_uv);
         metadata += ",\"front_back_source_max_uv\":" + std::to_string(tuning_front_back_source_max_uv);
         metadata += ",\"auto_material\":" + std::string(json_bool(tuning_auto_material));
@@ -11107,17 +11088,14 @@ namespace
                                        : tuning_server_batch_pacing_ms);
         metadata += ",\"bridge_events\":[\"mesh_profile_load\",\"pose_resolve\",\"planner_build\",\"bridge.paint_batch.request\",\"bridge.paint_batch.response\"]";
 
-        if (!brush_pipeline_version.supported)
+        if (!tuning_brush_1_enabled && !tuning_brush_2_enabled)
         {
             return response_json(
                 false,
-                "mesh_brush_pipeline_version_unsupported",
+                "mesh_brush_selection_invalid",
                 0,
                 1,
-                "brush_pipeline_version must be " +
-                    std::to_string(brush_pipeline_version.supported_version) +
-                    " for two-pass paint; requested " +
-                    std::to_string(brush_pipeline_version.requested_version),
+                "at least one brush must be enabled",
                 metadata + ",\"replay_blocked\":true");
         }
 
@@ -11361,16 +11339,6 @@ namespace
                     hex_address(initialized_paint_mesh) + "\"";
         metadata += ",\"packed_radius_calibration_selected_mesh_match\":" +
                     std::string(json_bool(initialized_paint_mesh_matches));
-        if (!initialized_paint_mesh_matches)
-        {
-            return response_json(false,
-                                 "packed_radius_calibration_target_mesh_mismatch",
-                                 0,
-                                 1,
-                                 "packed radius calibration mesh does not match the receiver TargetMesh",
-                                 metadata + ",\"replay_blocked\":true");
-        }
-
         write_bridge_progress("mesh_profile_load",
                               "Loading required mesh profile",
                               1,
@@ -11791,7 +11759,7 @@ namespace
                                                                  center_ray.location,
                                                                  camera_direction,
                                                                  region_axis,
-                                                                 tuning_brush_2_size_texels,
+                                                                 tuning_coverage_step_texels,
                                                                  plan_samples,
                                                                  plan_stats,
                                                                  planner_failure))
@@ -11975,7 +11943,7 @@ namespace
 
         metadata += ",";
         metadata += mesh_first_plan_stats_metadata(plan_stats);
-        metadata += ",\"planner_coverage_step_texels\":" + std::to_string(tuning_brush_2_size_texels);
+        metadata += ",\"planner_coverage_step_texels\":" + std::to_string(tuning_coverage_step_texels);
         metadata += ",\"source_distance_policy\":\"" +
                     std::string(research_force_paint_color
                                     ? "research_constant_paint_color"
@@ -12026,33 +11994,13 @@ namespace
         base_brush.Spacing = 1.0f;
         base_brush.Falloff = sdk::EBrushFalloff::Spherical;
         base_brush.BlendMode = sdk::EPaintBlendMode::Normal;
-        if (normal_paint_requires_packed &&
-            selected_mesh.source != "runtime_paint_get_initialized_paint_mesh")
-        {
-            return response_json(false,
-                                 "packed_radius_calibration_mesh_source_untrusted",
-                                 0,
-                                 1,
-                                 "packed radius calibration requires the initialized paint mesh",
-                                 metadata + ",\"replay_blocked\":true");
-        }
-        const bool uniform_packed_radius_calibration_required =
-            normal_paint_requires_packed && !research_triangle_world_radius;
+        const bool research_packed_radius_calibration_attempted =
+            research_artifacts && normal_paint_requires_packed && !research_triangle_world_radius;
         const auto packed_radius_calibration =
-            uniform_packed_radius_calibration_required
+            research_packed_radius_calibration_attempted
                 ? mesh_first_resolve_packed_radius_calibration(selected_mesh.mesh,
                                                                runtime_triangle_cache.triangles)
                 : MeshFirstPackedRadiusCalibration{};
-        if (uniform_packed_radius_calibration_required && !packed_radius_calibration.ok)
-        {
-            return response_json(false,
-                                 "packed_radius_calibration_failed",
-                                 0,
-                                 1,
-                                 "packed mesh radius calibration failed: " +
-                                     packed_radius_calibration.failure,
-                                 metadata + ",\"replay_blocked\":true");
-        }
         const bool research_radius_override_requested =
             research_artifacts && research_packed_radius_scale_override != 0.0;
         if (research_radius_override_requested &&
@@ -12067,15 +12015,17 @@ namespace
                                  "research packed radius scale must be from 0.5 through 4.0",
                                  metadata + ",\"replay_blocked\":true");
         }
+        const bool use_triangle_world_radius =
+            normal_paint_requires_packed && !research_radius_override_requested;
         const double packed_mesh_radius_scale =
-            uniform_packed_radius_calibration_required
-                ? (research_radius_override_requested
-                       ? research_packed_radius_scale_override
-                       : packed_radius_calibration.scale)
-                : 1.0;
+            research_radius_override_requested
+                ? research_packed_radius_scale_override
+                : runtime_contract::PackedMeshAnchorProductionRadiusScale;
         const double packed_wire_radius_scale = packed_mesh_radius_scale;
-        metadata += ",\"packed_mesh_radius_calibration_required\":" +
-                    std::string(json_bool(uniform_packed_radius_calibration_required));
+        metadata += ",\"packed_mesh_radius_calibration_required\":false";
+        metadata += ",\"packed_mesh_radius_calibration_research_only\":true";
+        metadata += ",\"packed_mesh_radius_calibration_attempted\":" +
+                    std::string(json_bool(research_packed_radius_calibration_attempted));
         metadata += ",\"packed_mesh_radius_calibration_ok\":" +
                     std::string(json_bool(packed_radius_calibration.ok));
         metadata += ",\"packed_mesh_radius_calibration_failure\":\"" +
@@ -12101,13 +12051,17 @@ namespace
         metadata += ",\"packed_mesh_radius_scale_source\":\"" +
                     std::string(!normal_paint_requires_packed
                                     ? "not_applicable_direct_uv"
-                                    : (research_triangle_world_radius
-                                           ? "research_triangle_world_radius_uv_unscaled"
-                                           : (research_radius_override_requested
-                                                  ? "research_override"
-                                                  : "runtime_uv_area_weighted_mesh_calibration"))) +
+                                    : (research_radius_override_requested
+                                           ? "research_uniform_override"
+                                           : (research_triangle_world_radius
+                                                  ? "research_triangle_world_radius_per_stroke"
+                                                  : "production_triangle_world_radius_per_stroke"))) +
                     "\"";
-        metadata += ",\"packed_mesh_radius_scale_application\":\"packed_wire_encoder_only\"";
+        metadata += ",\"packed_mesh_radius_scale_application\":\"" +
+                    std::string(use_triangle_world_radius
+                                    ? "uv_wire_identity_world_radius_per_stroke"
+                                    : "packed_wire_encoder_only") +
+                    "\"";
         const double texture_size_double = static_cast<double>(std::max(1, active_texture_size));
         const double brush_1_radius_uv =
             tuning_brush_1_size_texels / texture_size_double;
@@ -12125,25 +12079,24 @@ namespace
                     std::to_string(brush_1_radius_uv * packed_wire_radius_scale);
         metadata += ",\"brush_2_packed_radius_uv\":" +
                     std::to_string(brush_2_radius_uv * packed_wire_radius_scale);
-        metadata += ",\"stroke_size_texels\":" + std::to_string(tuning_brush_2_size_texels);
-        metadata += ",\"stroke_radius_texels\":" + std::to_string(tuning_brush_2_size_texels);
-        metadata += ",\"stroke_radius_uv\":" + std::to_string(brush_2_radius_uv);
-
         const bool any_fill_region = front_region_mode == MeshFirstRegionMode::Fill ||
                                      side_region_mode == MeshFirstRegionMode::Fill ||
                                      back_region_mode == MeshFirstRegionMode::Fill;
-        const double fill_stroke_radius_texels =
-            any_fill_region ? clamp_range(std::max(tuning_brush_1_size_texels * 4.0, 32.0),
-                                          tuning_brush_1_size_texels,
-                                          96.0)
-                            : tuning_brush_1_size_texels;
+        metadata += ",\"fill_all_regions\":" + std::string(json_bool(any_fill_region));
+        metadata += ",\"fill_scope\":\"all_mesh_regions_when_any_fill\"";
+        const double fill_stroke_radius_texels = 100.0;
         const double fill_stroke_radius_uv =
             fill_stroke_radius_texels / texture_size_double;
-        const double fill_cell_uv = std::max(fill_stroke_radius_uv * 0.75, brush_2_radius_uv);
+        const double fill_cell_uv = fill_stroke_radius_uv * 0.75;
         sdk::FRuntimeBrushSettings fill_brush = brush_1;
         fill_brush.Radius = static_cast<float>(fill_stroke_radius_uv);
+        const double enabled_brush_maximum_radius_uv =
+            tuning_brush_1_enabled && tuning_brush_2_enabled
+                ? std::max(brush_1_radius_uv, brush_2_radius_uv)
+                : (tuning_brush_1_enabled ? brush_1_radius_uv : brush_2_radius_uv);
         const double maximum_packed_radius_uv =
-            std::max({brush_1_radius_uv, brush_2_radius_uv, fill_stroke_radius_uv}) *
+            std::max(enabled_brush_maximum_radius_uv,
+                     any_fill_region ? fill_stroke_radius_uv : 0.0) *
             packed_wire_radius_scale;
         if (normal_paint_requires_packed &&
             (!std::isfinite(maximum_packed_radius_uv) ||
@@ -12158,7 +12111,7 @@ namespace
         }
         metadata += ",\"packed_mesh_maximum_radius_uv\":" +
                     std::to_string(maximum_packed_radius_uv);
-        metadata += ",\"fill_stroke_radius_source\":\"brush_1_x4\"";
+        metadata += ",\"fill_stroke_radius_source\":\"fixed_100_texels\"";
         metadata += ",\"fill_stroke_radius_texels\":" + std::to_string(fill_stroke_radius_texels);
         metadata += ",\"fill_stroke_radius_uv\":" + std::to_string(fill_stroke_radius_uv);
         metadata += ",\"fill_stroke_packed_radius_uv\":" +
@@ -12174,6 +12127,11 @@ namespace
             scanline_camera_right = sdk_vec_normalize(sdk_vec_cross(scanline_world_up, camera_direction));
             scanline_camera_right_available = sdk_vec_len(scanline_camera_right) > 0.000001;
         }
+        const auto scanline_camera_up = scanline_camera_right_available
+                                            ? sdk_vec_normalize(sdk_vec_cross(camera_direction,
+                                                                              scanline_camera_right))
+                                            : sdk::FVector{};
+        const bool scanline_camera_up_available = sdk_vec_len(scanline_camera_up) > 0.000001;
         const auto contract_region = [](MeshFirstRegion region) {
             if (region == MeshFirstRegion::Back)
                 return runtime_contract::ReplayRegion::Back;
@@ -12190,9 +12148,9 @@ namespace
         };
         std::vector<runtime_contract::TwoBrushReplayCandidate> replay_candidates{};
         replay_candidates.reserve(plan_samples.size());
-        double replay_reference_z_min = 0.0;
-        double replay_reference_z_max = 0.0;
-        bool replay_reference_z_bounds_available = false;
+        double replay_current_view_vertical_min = 0.0;
+        double replay_current_view_vertical_max = 0.0;
+        bool replay_current_view_vertical_bounds_available = false;
         for (std::size_t sample_index = 0; sample_index < plan_samples.size(); ++sample_index)
         {
             const auto& sample = plan_samples[sample_index];
@@ -12200,11 +12158,24 @@ namespace
                                                                  front_region_mode,
                                                                  side_region_mode,
                                                                  back_region_mode);
-            const double horizontal = scanline_camera_right_available
-                                          ? sdk_vec_dot(sdk_vec_sub(sample.world_position,
-                                                                    center_ray.location),
-                                                        scanline_camera_right)
-                                          : sample.local_position.X;
+            const auto camera_relative = sdk_vec_sub(sample.world_position, center_ray.location);
+            const double fallback_view_vertical = scanline_camera_up_available
+                                                      ? sdk_vec_dot(camera_relative, scanline_camera_up)
+                                                      : sample.world_position.Z;
+            const double fallback_view_horizontal = scanline_camera_right_available
+                                                        ? sdk_vec_dot(camera_relative, scanline_camera_right)
+                                                        : sample.world_position.X;
+            double projected_x = 0.0;
+            double projected_y = 0.0;
+            const bool current_view_projected =
+                sdk_project_world_to_screen(ref, ctx, sample.world_position, projected_x, projected_y) &&
+                std::isfinite(projected_x) && std::isfinite(projected_y);
+            const double current_view_vertical = current_view_projected
+                                                     ? -projected_y
+                                                     : fallback_view_vertical;
+            const double current_view_horizontal = current_view_projected
+                                                       ? projected_x
+                                                       : fallback_view_horizontal;
             replay_candidates.push_back(
                 {sample_index,
                  contract_region(sample.region),
@@ -12212,26 +12183,25 @@ namespace
                  sample.uv_island,
                  sample.u,
                  sample.v,
-                 sample.reference_position_available,
-                 sample.reference_position.Z,
-                 sample.local_position.Z,
-                 horizontal,
+                 current_view_projected,
+                 current_view_vertical,
+                 fallback_view_vertical,
+                 current_view_horizontal,
                  sample_index});
-            if (mode != MeshFirstRegionMode::Skip)
+            if (mode != MeshFirstRegionMode::Skip || any_fill_region)
             {
-                const double reference_z = sample.reference_position_available
-                                               ? sample.reference_position.Z
-                                               : sample.local_position.Z;
-                if (!replay_reference_z_bounds_available)
+                if (!replay_current_view_vertical_bounds_available)
                 {
-                    replay_reference_z_min = reference_z;
-                    replay_reference_z_max = reference_z;
-                    replay_reference_z_bounds_available = true;
+                    replay_current_view_vertical_min = current_view_vertical;
+                    replay_current_view_vertical_max = current_view_vertical;
+                    replay_current_view_vertical_bounds_available = true;
                 }
                 else
                 {
-                    replay_reference_z_min = std::min(replay_reference_z_min, reference_z);
-                    replay_reference_z_max = std::max(replay_reference_z_max, reference_z);
+                    replay_current_view_vertical_min =
+                        std::min(replay_current_view_vertical_min, current_view_vertical);
+                    replay_current_view_vertical_max =
+                        std::max(replay_current_view_vertical_max, current_view_vertical);
                 }
             }
         }
@@ -12239,7 +12209,9 @@ namespace
         auto replay_plan = runtime_contract::build_two_brush_replay_plan(
             replay_candidates,
             active_texture_size,
+            tuning_brush_1_enabled,
             tuning_brush_1_size_texels,
+            tuning_brush_2_enabled,
             tuning_brush_2_size_texels,
             fill_stroke_radius_texels);
         if (research_replay_stroke_index >= 0)
@@ -12327,7 +12299,6 @@ namespace
         double replay_triangle_world_scale_min = std::numeric_limits<double>::infinity();
         double replay_triangle_world_scale_max = 0.0;
         runtime_contract::ReplayPass previous_pass = runtime_contract::ReplayPass::Fill;
-        runtime_contract::ReplayRegion previous_region = runtime_contract::ReplayRegion::Front;
         runtime_contract::SpatialScanlineKey previous_spatial_key{};
         bool have_previous_partition_entry = false;
         for (const auto& entry : replay_plan.entries)
@@ -12345,8 +12316,7 @@ namespace
                                      "two-brush planner returned an invalid sample index",
                                      metadata + ",\"replay_blocked\":true");
             }
-            if (!have_previous_partition_entry ||
-                entry.pass != previous_pass || entry.region != previous_region)
+            if (!have_previous_partition_entry || entry.pass != previous_pass)
             {
                 ++replay_spatial_sort_partitions;
                 have_previous_partition_entry = true;
@@ -12357,7 +12327,6 @@ namespace
                 ++replay_spatial_order_violations;
             }
             previous_pass = entry.pass;
-            previous_region = entry.region;
             previous_spatial_key = entry.spatial_key;
 
             const auto& sample = plan_samples[entry.sample_index];
@@ -12420,7 +12389,7 @@ namespace
                                                    channel,
                                                    stroke_brush,
                                                    paint_target_channel);
-            if (research_triangle_world_radius && stroke.bHasSkeletalTriangleAnchor)
+            if (use_triangle_world_radius && stroke.bHasSkeletalTriangleAnchor)
             {
                 if (sample.triangle_index < 0 ||
                     sample.triangle_index >= static_cast<int>(runtime_triangle_cache.triangles.size()))
@@ -12445,8 +12414,18 @@ namespace
                                          "triangle-derived packed world radius found a degenerate UV-to-world mapping",
                                          metadata + ",\"replay_blocked\":true");
                 }
-                stroke.EffectiveBrushWorldRadius = static_cast<float>(
-                    world_units_per_uv * static_cast<double>(stroke.BrushSettings.Radius));
+                if (!runtime_contract::resolve_packed_triangle_world_radius(
+                        world_units_per_uv,
+                        stroke.BrushSettings.Radius,
+                        stroke.EffectiveBrushWorldRadius))
+                {
+                    return response_json(false,
+                                         "triangle_world_radius_value_invalid",
+                                         0,
+                                         1,
+                                         "triangle-derived packed world radius was outside the supported range",
+                                         metadata + ",\"replay_blocked\":true");
+                }
                 ++replay_triangle_world_radius_derived;
                 replay_triangle_world_scale_sum += world_units_per_uv;
                 replay_triangle_world_scale_min =
@@ -12487,20 +12466,24 @@ namespace
             }
         }
         metadata += ",\"replay_pass_order\":\"fill,coarse_paint,fine_paint\"";
-        metadata += ",\"replay_region_order\":\"back,side,front\"";
+        metadata += ",\"replay_region_order\":\"current_camera_scanline_across_regions\"";
         metadata += ",\"replay_fill_end\":" + std::to_string(replay_plan.fill_end);
         metadata += ",\"replay_coarse_end\":" + std::to_string(replay_plan.coarse_end);
         metadata += ",\"replay_fine_begin\":" + std::to_string(replay_plan.coarse_end);
-        metadata += ",\"replay_spatial_order\":\"profile_reference_z_desc_rows_camera_right_asc\"";
-        metadata += ",\"replay_spatial_reference_z_min\":" + std::to_string(replay_reference_z_min);
-        metadata += ",\"replay_spatial_reference_z_max\":" + std::to_string(replay_reference_z_max);
-        metadata += ",\"replay_spatial_reference_position_fallback_used\":" +
-                    std::string(json_bool(replay_plan.reference_position_fallback_used));
-        metadata += ",\"replay_spatial_reference_position_fallback_candidates\":" +
-                    std::to_string(replay_plan.reference_position_fallback_candidates);
-        metadata += ",\"replay_spatial_fallback_order\":\"runtime_local_z_desc_rows\"";
+        metadata += ",\"replay_spatial_order\":\"current_pose_camera_projection_top_to_bottom_left_to_right\"";
+        metadata += ",\"replay_spatial_current_view_vertical_min\":" +
+                    std::to_string(replay_current_view_vertical_min);
+        metadata += ",\"replay_spatial_current_view_vertical_max\":" +
+                    std::to_string(replay_current_view_vertical_max);
+        metadata += ",\"replay_spatial_current_view_projection_fallback_used\":" +
+                    std::string(json_bool(replay_plan.current_view_projection_fallback_used));
+        metadata += ",\"replay_spatial_current_view_projection_fallback_candidates\":" +
+                    std::to_string(replay_plan.current_view_projection_fallback_candidates);
+        metadata += ",\"replay_spatial_fallback_order\":\"current_pose_camera_basis\"";
         metadata += ",\"replay_spatial_camera_right_available\":" +
                     std::string(json_bool(scanline_camera_right_available));
+        metadata += ",\"replay_spatial_camera_up_available\":" +
+                    std::string(json_bool(scanline_camera_up_available));
         metadata += ",\"replay_spatial_sort_partitions\":" + std::to_string(replay_spatial_sort_partitions);
         metadata += ",\"replay_spatial_order_violations\":" + std::to_string(replay_spatial_order_violations);
         metadata += ",\"replay_spatial_sort_elapsed_ms\":" + std::to_string(replay_spatial_sort_elapsed_ms);
@@ -12555,8 +12538,8 @@ namespace
                 ? requested_pacing_decision.remote_batch_limit
                 : tuning_server_batch_limit;
         metadata += ",\"replay_triangle_world_radius_normalization\":\"" +
-                    std::string(research_triangle_world_radius
-                                    ? "max_per_actual_encoder_slice"
+                    std::string(use_triangle_world_radius
+                                    ? "per_stroke"
                                     : "not_requested") +
                     "\"";
         if (research_artifacts)
@@ -12657,9 +12640,9 @@ namespace
         metadata += ",\"replay_triangle_anchors\":" + std::to_string(replay_triangle_anchors);
         metadata += ",\"mesh_anchor_effective_world_radius_policy\":\"" +
                     std::string(normal_paint_requires_packed
-                                    ? (research_triangle_world_radius
-                                           ? "research_triangle_jacobian_batch_max"
-                                           : "game_derived_nonpositive_sentinel")
+                                    ? (use_triangle_world_radius
+                                           ? "triangle_jacobian_per_stroke"
+                                           : "research_uniform_wire_scale_game_sentinel")
                                     : "not_applicable_nonpacked_route") +
                     "\"";
         metadata += ",\"mesh_anchor_effective_subdivision_policy\":\"" +
@@ -12800,6 +12783,22 @@ namespace
                                      metadata + ",\"replay_blocked\":true");
             }
         }
+        auto activate_server_packed_fallback = [&](const std::string& reason) {
+            if (server_packed_fallback)
+            {
+                return;
+            }
+            server_packed_fallback = true;
+            server_packed_fallback_reason = reason;
+            use_packed_local_queue = false;
+            local_visual_sync_enabled = false;
+            metadata += ",\"local_route_mode\":\"server_packed_fallback\"";
+            metadata += ",\"fallback_reason\":\"" + json_escape(reason) + "\"";
+            metadata += ",\"fallback_batch_limit\":" +
+                        std::to_string(runtime_contract::ServerPackedFallbackBatchLimit);
+            metadata += ",\"fallback_pacing_ms\":" +
+                        std::to_string(runtime_contract::ServerPackedFallbackPacingMs);
+        };
         LocalPackedQueueRoute local_packed_queue_route{};
         sdk::FGuid local_packed_queue_source_id{};
         if (use_packed_local_queue)
@@ -12815,11 +12814,18 @@ namespace
                 local_packed_queue_source_id.D ^= 0x00000001u;
             }
             const auto module = main_module_range();
+            static const auto text_identity = main_module_text_file_identity();
             const auto rva = [&](std::uintptr_t address) -> std::uintptr_t {
                 return module.base && address >= module.base && address < module.base + module.size
                            ? address - module.base
                            : 0;
             };
+            metadata += ",\"game_main_module_size\":" + std::to_string(module.size);
+            metadata += ",\"game_text_identity_available\":" +
+                        std::string(json_bool(text_identity.ok));
+            metadata += ",\"game_text_raw_size\":" + std::to_string(text_identity.raw_size);
+            metadata += ",\"game_text_fnv1a64\":\"" +
+                        std::to_string(text_identity.fnv1a64) + "\"";
             metadata += ",\"local_packed_queue_resolver_status\":\"" +
                         json_escape(local_packed_queue_route.status) + "\"";
             metadata += ",\"local_packed_queue_resolver_failure\":\"" +
@@ -12846,13 +12852,9 @@ namespace
             metadata += ",\"local_apply_completion_semantics\":\"receiver_returned_and_exact_queue_delta_observed;pixel_completion_not_verified\"";
             if (!local_packed_queue_route.resolved)
             {
-                return response_json(false,
-                                     "mesh_local_packed_queue_resolver_failed",
-                                     0,
-                                     1,
-                                     "local packed receiver route validation failed for this game build: " +
-                                         local_packed_queue_route.failure,
-                                     metadata + ",\"replay_blocked\":true");
+                activate_server_packed_fallback(
+                    "local packed receiver route validation failed for this game build: " +
+                    local_packed_queue_route.failure);
             }
         }
         std::uintptr_t replication_manager = ref.find_first_instance("RuntimePaintReplicationManager");
@@ -12880,15 +12882,14 @@ namespace
                         json_escape(manager_resolver_failure) + "\"";
             if (!exact_manager || !exact_manager_class_ok)
             {
-                return response_json(false,
-                                     "mesh_local_packed_queue_manager_resolver_failed",
-                                     0,
-                                     1,
-                                     "the paint component's exact replication manager could not be resolved safely: " +
-                                         manager_resolver_failure,
-                                     metadata + ",\"replay_blocked\":true");
+                activate_server_packed_fallback(
+                    "the paint component's exact replication manager could not be resolved safely: " +
+                    manager_resolver_failure);
             }
-            replication_manager = exact_manager;
+            else
+            {
+                replication_manager = exact_manager;
+            }
         }
         if (normal_paint_requires_packed && !packed_component_available)
         {
@@ -12934,7 +12935,7 @@ namespace
             metadata += ",\"local_texture_import_required\":true";
             metadata += ",\"authoritative_replay\":\"local_texture_preview_only\"";
         }
-        else if (local_visual_sync_requested)
+        else if (local_visual_sync_enabled)
         {
             metadata += ",\"local_paint_rpc\":\"" +
                         std::string(use_packed_local_queue
@@ -12996,8 +12997,10 @@ namespace
         else
         {
             metadata += ",\"local_paint_rpc\":\"none\"";
-            metadata += ",\"local_paint_available\":" + std::string(json_bool(ctx.local_paint_at_uv_function != 0));
-            metadata += ",\"local_visual_sync_mode\":\"research_packed_only\"";
+            metadata += ",\"local_paint_available\":false";
+            metadata += ",\"local_visual_sync_mode\":\"" +
+                        std::string(server_packed_fallback ? "server_packed_fallback" : "research_packed_only") +
+                        "\"";
             metadata += ",\"local_batch_strategy\":\"disabled\"";
             metadata += ",\"local_paint_target_channel\":\"none\"";
             metadata += ",\"local_visual_sync_required\":false";
@@ -13005,7 +13008,11 @@ namespace
             metadata += ",\"local_visual_sync_after_each_server_stroke\":false";
             metadata += ",\"local_visual_sync_lockstep_with_server_batch\":false";
             metadata += ",\"local_texture_import_required\":false";
-            metadata += ",\"authoritative_replay\":\"research_server_packed_only\"";
+            metadata += ",\"authoritative_replay\":\"" +
+                        std::string(server_packed_fallback
+                                        ? "server_packed_fallback"
+                                        : "research_server_packed_only") +
+                        "\"";
         }
         metadata += ",\"server_texture_sync_mode\":\"disabled\"";
         metadata += ",\"post_import_texture_sync_enabled\":" + std::string(json_bool(MeshFirstPostImportTextureSyncEnabled));
@@ -13170,15 +13177,9 @@ namespace
              !replication_before.manager_component_queued_count_available ||
              replication_before.manager_component_queued_count < 0))
         {
-            metadata += mesh_first_replication_snapshot_metadata("mesh_rep_before", replication_before);
-            return response_json(false,
-                                 "mesh_local_packed_queue_preflight_failed",
-                                 0,
-                                 1,
-                                 "the exact local receiver queue could not be measured before any server batch was submitted",
-                                 metadata +
-                                     ",\"local_packed_queue_preflight_failure\":\"exact_component_queue_probe_unavailable\"" +
-                                     ",\"replay_blocked\":true");
+            metadata += ",\"local_packed_queue_preflight_failure\":\"exact_component_queue_probe_unavailable\"";
+            activate_server_packed_fallback(
+                "the exact local receiver queue could not be measured before any server batch was submitted");
         }
         if (use_packed_local_queue &&
             replication_before.manager_component_queued_count != 0)
@@ -13310,7 +13311,9 @@ namespace
             async_job->server_packed_paint_source_id = packed_source_id;
             async_job->server_batch_rpc = use_packed_server_batch ? "ServerPackedPaintBatch" : "none";
             async_job->packed_wire_radius_scale = packed_wire_radius_scale;
-            async_job->local_visual_sync_enabled = local_visual_sync_requested;
+            async_job->local_visual_sync_enabled = local_visual_sync_enabled;
+            async_job->server_packed_fallback = server_packed_fallback;
+            async_job->server_packed_fallback_reason = server_packed_fallback_reason;
             async_job->strokes = std::move(strokes);
             async_job->initial_stroke_count = static_cast<int>(async_job->strokes.size());
             if (async_job->internal_no_resend_local_apply_enabled)
@@ -13374,18 +13377,23 @@ namespace
                 replication_before.manager_max_outgoing_network_batches_per_second,
                 observed_max_replicated_strokes,
                 replication_before.manager_max_render_target_writes_per_frame);
-            async_job->pacing_used_contract_fallback = effective_pacing_decision.used_contract_fallback;
-            async_job->pacing_source = effective_pacing_decision.used_contract_fallback
-                                           ? "shipping_contract_fallback"
-                                           : "game_limits";
-            async_job->pacing_fallback_reason = effective_pacing_decision.used_contract_fallback
-                                                    ? "game_limit_property_unavailable"
-                                                    : "";
+            async_job->pacing_used_contract_fallback =
+                server_packed_fallback || effective_pacing_decision.used_contract_fallback;
+            async_job->pacing_source = server_packed_fallback
+                                           ? "server_packed_fallback"
+                                           : (effective_pacing_decision.used_contract_fallback
+                                                  ? "shipping_contract_fallback"
+                                                  : "game_limits");
+            async_job->pacing_fallback_reason = server_packed_fallback
+                                                    ? server_packed_fallback_reason
+                                                    : (effective_pacing_decision.used_contract_fallback
+                                                           ? "game_limit_property_unavailable"
+                                                           : "");
             async_job->metadata += ",\"replication_pacing_control\":\"batch_sliders\"";
             async_job->metadata += ",\"replication_pacing_source\":\"" +
                                    async_job->pacing_source + "\"";
             async_job->metadata += ",\"replication_pacing_used_contract_fallback\":" +
-                                   std::string(json_bool(effective_pacing_decision.used_contract_fallback));
+                                   std::string(json_bool(async_job->pacing_used_contract_fallback));
             async_job->metadata += ",\"replication_pacing_fallback_reason\":\"" +
                                    async_job->pacing_fallback_reason + "\"";
             async_job->server_batch_limit = effective_pacing_decision.remote_batch_limit;
@@ -13403,11 +13411,28 @@ namespace
             async_job->local_render_target_write_budget =
                 std::max(1, effective_pacing_decision.local_batch_limit) *
                 runtime_contract::paint_channel_write_cost(static_cast<int>(sdk::EPaintChannel::All));
-            async_job->replication_pacing_enabled = normal_paint_requires_packed;
-            async_job->replication_pacing_requested_batch_limit = tuning_server_batch_limit;
-            async_job->replication_pacing_requested_delay_ms = tuning_server_batch_pacing_ms;
+            async_job->replication_pacing_enabled =
+                normal_paint_requires_packed && !server_packed_fallback;
+            async_job->replication_pacing_requested_batch_limit =
+                server_packed_fallback
+                    ? runtime_contract::ServerPackedFallbackBatchLimit
+                    : tuning_server_batch_limit;
+            async_job->replication_pacing_requested_delay_ms =
+                server_packed_fallback
+                    ? runtime_contract::ServerPackedFallbackPacingMs
+                    : tuning_server_batch_pacing_ms;
             mesh_first_update_replication_pacing_model(async_job, replication_before);
-            if (async_job->replication_pacing_enabled)
+            if (server_packed_fallback)
+            {
+                async_job->replication_pacing_resolved_batch_limit =
+                    runtime_contract::ServerPackedFallbackBatchLimit;
+                async_job->replication_pacing_resolved_pacing_ms =
+                    runtime_contract::ServerPackedFallbackPacingMs;
+                async_job->server_batch_limit = runtime_contract::ServerPackedFallbackBatchLimit;
+                async_job->server_batch_delay_ms = runtime_contract::ServerPackedFallbackPacingMs;
+                async_job->replication_pacing_pressure_level = "server_packed_fallback";
+            }
+            else if (async_job->replication_pacing_enabled)
             {
                 mesh_first_update_replication_pacing_resolved_batch(async_job, replication_before);
                 mesh_first_set_replication_pacing_effective(async_job,
@@ -14238,6 +14263,37 @@ namespace
             post_next_after(job->local_packed_queue_drain_poll_ms);
         };
 
+        auto activate_server_packed_fallback = [&](const std::string& reason) {
+            if (job->server_packed_fallback)
+            {
+                return;
+            }
+            job->server_packed_fallback = true;
+            job->server_packed_fallback_reason = reason;
+            job->local_packed_queue_enabled = false;
+            job->local_visual_sync_enabled = false;
+            job->replication_pacing_enabled = false;
+            job->replication_pacing_requested_batch_limit =
+                runtime_contract::ServerPackedFallbackBatchLimit;
+            job->replication_pacing_resolved_batch_limit =
+                runtime_contract::ServerPackedFallbackBatchLimit;
+            job->replication_pacing_requested_delay_ms =
+                runtime_contract::ServerPackedFallbackPacingMs;
+            job->replication_pacing_resolved_pacing_ms =
+                runtime_contract::ServerPackedFallbackPacingMs;
+            job->server_batch_limit = runtime_contract::ServerPackedFallbackBatchLimit;
+            job->server_batch_delay_ms = runtime_contract::ServerPackedFallbackPacingMs;
+            job->replication_pacing_pressure_level = "server_packed_fallback";
+            job->server_next_dispatch_time = std::chrono::steady_clock::now();
+            job->local_next_dispatch_time = {};
+            job->metadata += ",\"local_route_mode\":\"server_packed_fallback\"";
+            job->metadata += ",\"fallback_reason\":\"" + json_escape(reason) + "\"";
+            job->metadata += ",\"fallback_batch_limit\":" +
+                             std::to_string(runtime_contract::ServerPackedFallbackBatchLimit);
+            job->metadata += ",\"fallback_pacing_ms\":" +
+                             std::to_string(runtime_contract::ServerPackedFallbackPacingMs);
+        };
+
         if (queued_paint_cancel_reason(job->queued) == PaintCancelReason::UserRequest &&
             job->phase == MeshFirstBatchPhase::ServerBatch && job->local_packed_queue_enabled)
         {
@@ -14773,10 +14829,8 @@ namespace
                                                                ",resolved=" + hex_address(current_exact_manager)
                                                          : "local_packed_queue_exact_manager_unavailable:" +
                                                                manager_resolver_failure;
-                    finish_failed("mesh_local_packed_queue_precommit_manager_failed",
-                                  "The paint component's exact replication manager changed or became unavailable before the next server batch; no new batch was submitted.",
-                                  job->local_visual_sync_failure);
-                    return;
+                    activate_server_packed_fallback(
+                        "The paint component's exact replication manager changed or became unavailable before the next server batch; no new batch was submitted.");
                 }
             }
 
@@ -14839,29 +14893,31 @@ namespace
                                                          ? "local_packed_queue_source_identity_changed:" +
                                                                current_source_failure
                                                          : "local_packed_queue_precommit_route_unavailable";
-                    finish_failed("mesh_local_packed_queue_precommit_failed",
-                                  "The paired local receiver route changed before the next server batch; no new batch was submitted.",
-                                  job->local_visual_sync_failure);
-                    return;
+                    activate_server_packed_fallback(
+                        "The paired local receiver route changed before the next server batch; no new batch was submitted.");
                 }
-                paired_queue_before = capture_replication_pacing_pressure();
-                if (paired_queue_before.manager != job->replication_manager ||
-                    !paired_queue_before.manager_available ||
-                    !paired_queue_before.manager_component_queued_count_available ||
-                    paired_queue_before.manager_component_queued_count < 0)
+                if (job->local_packed_queue_enabled)
                 {
-                    job->local_visual_sync_failure = "local_packed_queue_precommit_probe_unavailable";
-                    finish_failed("mesh_local_packed_queue_precommit_probe_failed",
-                                  "The exact local receiver queue could not be measured before the next server batch; no new batch was submitted.",
-                                  job->local_visual_sync_failure);
-                    return;
+                    paired_queue_before = capture_replication_pacing_pressure();
+                    if (paired_queue_before.manager != job->replication_manager ||
+                        !paired_queue_before.manager_available ||
+                        !paired_queue_before.manager_component_queued_count_available ||
+                        paired_queue_before.manager_component_queued_count < 0)
+                    {
+                        job->local_visual_sync_failure = "local_packed_queue_precommit_probe_unavailable";
+                        activate_server_packed_fallback(
+                            "The exact local receiver queue could not be measured before the next server batch; no new batch was submitted.");
+                    }
                 }
-                paired_raw_i64_170_before = safe_read<std::int64_t>(job->replication_manager + 0x170, -1);
-                job->local_packed_queue_commit_capacity_limit =
-                    std::max(1, job->server_batch_limit);
-                job->local_packed_queue_max_precommit_queue =
-                    std::max(job->local_packed_queue_max_precommit_queue,
-                             paired_queue_before.manager_component_queued_count);
+                if (job->local_packed_queue_enabled)
+                {
+                    paired_raw_i64_170_before = safe_read<std::int64_t>(job->replication_manager + 0x170, -1);
+                    job->local_packed_queue_commit_capacity_limit =
+                        std::max(1, job->server_batch_limit);
+                    job->local_packed_queue_max_precommit_queue =
+                        std::max(job->local_packed_queue_max_precommit_queue,
+                                 paired_queue_before.manager_component_queued_count);
+                }
             }
 
             if (server_due && !server_throttled && job->local_packed_queue_enabled &&
@@ -16637,7 +16693,6 @@ namespace
 
         bool packet_uses_auto_world_radius = false;
         bool packet_uses_derived_world_radius = false;
-        float packet_derived_world_radius = 0.0f;
         std::vector<float> wire_radii(count, 0.0f);
         for (std::size_t i = 0; i < count; ++i)
         {
@@ -16671,8 +16726,6 @@ namespace
             else
             {
                 packet_uses_derived_world_radius = true;
-                packet_derived_world_radius =
-                    std::max(packet_derived_world_radius, stroke.EffectiveBrushWorldRadius);
             }
         }
         if (packet_uses_auto_world_radius && packet_uses_derived_world_radius)
@@ -16712,10 +16765,7 @@ namespace
             packed.push_back(sdk_unit_to_byte(stroke.ChannelData.Metallic));
             packed.push_back(sdk_unit_to_byte(stroke.ChannelData.Roughness));
             packed.push_back(static_cast<std::uint8_t>(static_cast<std::uint8_t>(stroke.TargetChannel) + 1));
-            sdk_append_f32_le(packed,
-                              packet_uses_derived_world_radius
-                                  ? packet_derived_world_radius
-                                  : stroke.EffectiveBrushWorldRadius);
+            sdk_append_f32_le(packed, stroke.EffectiveBrushWorldRadius);
             const auto subdivision_tail = runtime_contract::packed_mesh_anchor_auto_subdivision_tail();
             packed.insert(packed.end(), subdivision_tail.begin(), subdivision_tail.end());
         }
@@ -17046,39 +17096,18 @@ namespace
             return out;
         }
         const auto nt = safe_read<IMAGE_NT_HEADERS64>(module.base + static_cast<std::uintptr_t>(dos.e_lfanew));
-        const bool steam_shipping_build =
-            nt.Signature == IMAGE_NT_SIGNATURE &&
-            nt.OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC &&
-            nt.FileHeader.TimeDateStamp == 0xB76CD1AFu &&
-            nt.OptionalHeader.SizeOfImage == 0x0AAFD000u &&
-            nt.OptionalHeader.CheckSum == 0x0A7394E2u;
-        if (!steam_shipping_build)
+        if (nt.Signature != IMAGE_NT_SIGNATURE ||
+            nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
         {
-            out.failure = "main_module_build_identity_mismatch";
+            out.failure = "main_module_nt_header_mismatch";
             return out;
         }
-        static const auto text_file_identity = main_module_text_file_identity();
-        if (!text_file_identity.ok || text_file_identity.raw_size != 0x07AA2800u ||
-            text_file_identity.fnv1a64 != 0x4200B2CAF330F8C3ULL)
-        {
-            out.failure = "main_module_text_identity_mismatch";
-            return out;
-        }
-
-        constexpr std::uintptr_t ExpectedThunkRva = 0x50E40E0;
-        constexpr std::uintptr_t ExpectedImplementationRva = 0x50FBD80;
-        constexpr std::uintptr_t ExpectedDecoderRva = 0x5103A10;
-        constexpr std::uintptr_t ExpectedEnqueueInnerRva = 0x50F5EE0;
-        constexpr std::uintptr_t ExpectedComponentContextResolverRva = 0x3AEAF10;
-        constexpr std::uintptr_t ExpectedManagerResolverRva = 0x50E9170;
-        constexpr std::uintptr_t ExpectedManagerEnqueueRva = 0x5109030;
-        constexpr std::uintptr_t ExpectedQueueCoalescerRva = 0x5108E30;
 
         std::vector<std::uintptr_t> thunks{};
         for (std::uintptr_t slot = 0; slot <= 0x180; slot += sizeof(std::uintptr_t))
         {
             const auto thunk = safe_read<std::uintptr_t>(multicast_packed_paint_batch_function + slot);
-            if (!address_in_main_module_code(thunk) || thunk - module.base != ExpectedThunkRva)
+            if (!address_in_main_module_code(thunk))
             {
                 continue;
             }
@@ -17088,11 +17117,15 @@ namespace
                                         0x57, 0x48, 0x83, 0xEC, 0x30,
                                         0x33, 0xFF, 0x48, 0x8B, 0xDA}) ||
                 !internal_code_matches(thunk + 0xB8,
-                                       {0x48, 0x8B, 0x06, 0xFF, 0x90, 0x50, 0x05, 0x00, 0x00}))
+                                       {0x48, 0x8B, 0x06, 0xFF, 0x90, 0x00, 0x00, 0x00, 0x00},
+                                       "xxxxx????"))
             {
                 continue;
             }
-            thunks.push_back(thunk);
+            if (std::find(thunks.begin(), thunks.end(), thunk) == thunks.end())
+            {
+                thunks.push_back(thunk);
+            }
         }
         if (thunks.size() != 1)
         {
@@ -17101,78 +17134,98 @@ namespace
         }
 
         const auto vtable = safe_read<std::uintptr_t>(component);
-        const auto implementation = safe_read<std::uintptr_t>(vtable + 0x550);
-        if (!address_in_main_module_code(implementation) ||
-            implementation - module.base != ExpectedImplementationRva ||
-            !internal_code_matches(implementation,
-                                   {0x48, 0x89, 0x6C, 0x24, 0x18,
-                                    0x57, 0x48, 0x83, 0xEC, 0x50,
-                                    0x33, 0xFF, 0x4C, 0x8D, 0x4C, 0x24, 0x40}) ||
-            !internal_code_matches(implementation + 0xA0,
-                                   {0x44, 0x8B, 0x4B, 0xF8,
-                                    0x41, 0x8B, 0xC1,
-                                    0x8B, 0x4B, 0xFC}) ||
-            !internal_code_matches(implementation + 0xD5,
-                                   {0x41, 0x0B, 0xC8, 0x41, 0x0B, 0xC9, 0x74, 0x57}))
+        if (!vtable)
         {
-            out.failure = "local_packed_queue_vtable_implementation_mismatch";
-            return out;
-        }
-        const auto decoder = internal_rel32_call_target(implementation + 0x1E);
-        const auto enqueue_inner = internal_rel32_call_target(implementation + 0x14D);
-        if (!address_in_main_module_code(decoder) || decoder - module.base != ExpectedDecoderRva ||
-            !internal_code_matches(decoder,
-                                   {0x4C, 0x89, 0x4C, 0x24, 0x20,
-                                    0x44, 0x89, 0x44, 0x24, 0x18,
-                                    0x53, 0x55, 0x56,
-                                    0x48, 0x81, 0xEC, 0xA0, 0x00, 0x00, 0x00}) ||
-            !address_in_main_module_code(enqueue_inner) ||
-            enqueue_inner - module.base != ExpectedEnqueueInnerRva ||
-            !internal_code_matches(enqueue_inner,
-                                   {0x48, 0x89, 0x74, 0x24, 0x10,
-                                    0x57, 0x48, 0x81, 0xEC, 0x20, 0x01, 0x00, 0x00}))
-        {
-            out.failure = "local_packed_queue_decoder_or_inner_mismatch";
-            return out;
-        }
-        const auto component_context_resolver = internal_rel32_call_target(enqueue_inner + 0x175);
-        const auto manager_resolver = internal_rel32_call_target(enqueue_inner + 0x182);
-        if (!internal_code_matches(enqueue_inner + 0x166,
-                                   {0x48, 0x8B, 0x87, 0xA8, 0x00, 0x00, 0x00,
-                                    0x48, 0x85, 0xC0,
-                                    0x75, 0x0D,
-                                    0x48, 0x8B, 0xCF}) ||
-            !address_in_main_module_code(component_context_resolver) ||
-            component_context_resolver - module.base != ExpectedComponentContextResolverRva ||
-            !address_in_main_module_code(manager_resolver) ||
-            manager_resolver - module.base != ExpectedManagerResolverRva)
-        {
-            out.failure = "local_packed_queue_manager_resolver_mismatch";
-            return out;
-        }
-        const auto manager_enqueue = internal_rel32_call_target(enqueue_inner + 0x1A0);
-        if (!address_in_main_module_code(manager_enqueue) ||
-            manager_enqueue - module.base != ExpectedManagerEnqueueRva ||
-            !internal_code_matches(manager_enqueue,
-                                   {0x48, 0x83, 0xEC, 0x38,
-                                    0x48, 0x8B, 0xC2,
-                                    0xC6, 0x44, 0x24, 0x28, 0x00}) ||
-            internal_rel32_call_target(manager_enqueue + 0x1B) != module.base + ExpectedQueueCoalescerRva)
-        {
-            out.failure = "local_packed_queue_manager_enqueue_mismatch";
+            out.failure = "local_packed_queue_vtable_unavailable";
             return out;
         }
 
-        out.resolved = true;
-        out.status = "resolved";
-        out.thunk = thunks.front();
-        out.implementation = implementation;
-        out.decoder = decoder;
-        out.enqueue_inner = enqueue_inner;
-        out.manager_enqueue = manager_enqueue;
-        out.component_context_resolver = component_context_resolver;
-        out.manager_resolver = manager_resolver;
-        return out;
+        std::vector<LocalPackedQueueRoute> candidates{};
+        for (std::uintptr_t slot = 0; slot <= 0x800; slot += sizeof(std::uintptr_t))
+        {
+            const auto implementation = safe_read<std::uintptr_t>(vtable + slot);
+            if (!address_in_main_module_code(implementation) ||
+                !internal_code_matches(implementation,
+                                       {0x48, 0x89, 0x6C, 0x24, 0x18,
+                                        0x57, 0x48, 0x83, 0xEC, 0x50,
+                                        0x33, 0xFF, 0x4C, 0x8D, 0x4C, 0x24, 0x40}) ||
+                !internal_code_matches(implementation + 0xA0,
+                                       {0x44, 0x8B, 0x4B, 0xF8,
+                                        0x41, 0x8B, 0xC1,
+                                        0x8B, 0x4B, 0xFC}) ||
+                !internal_code_matches(implementation + 0xD5,
+                                       {0x41, 0x0B, 0xC8, 0x41, 0x0B, 0xC9, 0x74, 0x00},
+                                       "xxxxxxx?"))
+            {
+                continue;
+            }
+
+            const auto decoder = internal_rel32_call_target(implementation + 0x1E);
+            const auto enqueue_inner = internal_rel32_call_target(implementation + 0x14D);
+            if (!address_in_main_module_code(decoder) ||
+                !internal_code_matches(decoder,
+                                       {0x4C, 0x89, 0x4C, 0x24, 0x20,
+                                        0x44, 0x89, 0x44, 0x24, 0x18,
+                                        0x53, 0x55, 0x56,
+                                        0x48, 0x81, 0xEC, 0xA0, 0x00, 0x00, 0x00}) ||
+                !address_in_main_module_code(enqueue_inner) ||
+                !internal_code_matches(enqueue_inner,
+                                       {0x48, 0x89, 0x74, 0x24, 0x10,
+                                        0x57, 0x48, 0x81, 0xEC, 0x20, 0x01, 0x00, 0x00}) ||
+                !internal_code_matches(enqueue_inner + 0x166,
+                                       {0x48, 0x8B, 0x87, 0xA8, 0x00, 0x00, 0x00,
+                                        0x48, 0x85, 0xC0,
+                                        0x75, 0x0D,
+                                        0x48, 0x8B, 0xCF}))
+            {
+                continue;
+            }
+
+            const auto component_context_resolver = internal_rel32_call_target(enqueue_inner + 0x175);
+            const auto manager_resolver = internal_rel32_call_target(enqueue_inner + 0x182);
+            const auto manager_enqueue = internal_rel32_call_target(enqueue_inner + 0x1A0);
+            const auto queue_coalescer = internal_rel32_call_target(manager_enqueue + 0x1B);
+            if (!address_in_main_module_code(component_context_resolver) ||
+                !address_in_main_module_code(manager_resolver) ||
+                !address_in_main_module_code(manager_enqueue) ||
+                !internal_code_matches(manager_enqueue,
+                                       {0x48, 0x83, 0xEC, 0x38,
+                                        0x48, 0x8B, 0xC2,
+                                        0xC6, 0x44, 0x24, 0x28, 0x00}) ||
+                !address_in_main_module_code(queue_coalescer) ||
+                component_context_resolver == manager_resolver ||
+                manager_enqueue == queue_coalescer)
+            {
+                continue;
+            }
+
+            const auto duplicate = std::find_if(candidates.begin(), candidates.end(),
+                                                [&](const auto& candidate) {
+                                                    return candidate.implementation == implementation;
+                                                });
+            if (duplicate != candidates.end())
+            {
+                continue;
+            }
+            LocalPackedQueueRoute candidate{};
+            candidate.resolved = true;
+            candidate.status = "resolved";
+            candidate.thunk = thunks.front();
+            candidate.implementation = implementation;
+            candidate.decoder = decoder;
+            candidate.enqueue_inner = enqueue_inner;
+            candidate.manager_enqueue = manager_enqueue;
+            candidate.component_context_resolver = component_context_resolver;
+            candidate.manager_resolver = manager_resolver;
+            candidates.push_back(candidate);
+        }
+        if (candidates.size() != 1)
+        {
+            out.failure = "validated_local_packed_queue_route_count:" +
+                          std::to_string(candidates.size());
+            return out;
+        }
+        return candidates.front();
     }
 
     auto resolve_internal_no_resend_route(Reflection& ref,

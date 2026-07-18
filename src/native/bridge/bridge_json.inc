@@ -195,6 +195,8 @@
         }
 
         std::string out;
+        const bool server_packed_fallback =
+            metadata_contains_string(metadata, "local_route_mode", "server_packed_fallback");
         for (const char* key : {
                  "route",
                  "mesh_first_pipeline",
@@ -206,16 +208,28 @@
                  "paint_region_count",
                  "fill_region_count",
                  "skip_region_count",
+                 "fill_all_regions",
+                 "fill_scope",
                  "brush_pipeline",
-                 "brush_pipeline_version_requested",
-                 "brush_pipeline_version_supported",
-                 "brush_pipeline_version_required",
-                 "brush_pipeline_supported_version",
+                 "brush_1_enabled",
                  "brush_1_size_texels",
+                 "brush_2_enabled",
                  "brush_2_size_texels",
+                 "coverage_step_texels",
+                 "planner_coverage_step_texels",
                  "brush_1_radius_texels",
                  "brush_2_radius_texels",
                  "fill_stroke_radius_texels",
+                 "fill_stroke_radius_source",
+                 "packed_mesh_radius_calibration_required",
+                 "packed_mesh_radius_calibration_research_only",
+                 "packed_mesh_radius_calibration_attempted",
+                 "packed_mesh_radius_scale_effective",
+                 "packed_mesh_radius_scale_source",
+                 "packed_mesh_radius_scale_application",
+                 "replay_triangle_world_radius_derived",
+                 "replay_triangle_world_radius_normalization",
+                 "mesh_anchor_effective_world_radius_policy",
                  "server_batch_limit",
                  "server_batch_limit_effective",
                  "server_batch_pacing_ms",
@@ -279,8 +293,23 @@
                  "local_strokes_synced",
                  "local_strokes_total",
                  "local_apply_route",
+                 "local_route_mode",
+                 "fallback_reason",
+                 "fallback_batch_limit",
+                 "fallback_pacing_ms",
+                 "game_main_module_size",
+                 "game_text_identity_available",
+                 "game_text_raw_size",
+                 "game_text_fnv1a64",
                  "local_packed_queue_resolver_status",
                  "local_packed_queue_resolver_failure",
+                 "local_packed_queue_thunk_rva",
+                 "local_packed_queue_implementation_rva",
+                 "local_packed_queue_decoder_rva",
+                 "local_packed_queue_enqueue_inner_rva",
+                 "local_packed_queue_manager_enqueue_rva",
+                 "local_packed_queue_component_context_resolver_rva",
+                 "local_packed_queue_manager_resolver_rva",
                  "local_packed_queue_exact_manager",
                  "local_packed_queue_exact_manager_class",
                  "local_packed_queue_exact_manager_class_ok",
@@ -297,6 +326,7 @@
                  "local_packed_queue_last_queue_after",
                  "local_packed_queue_last_queue_delta",
                  "local_packed_queue_initial_queue",
+                 "local_packed_queue_preflight_failure",
                  "local_packed_queue_drain_started",
                  "local_packed_queue_drain_current_queue",
                  "local_packed_queue_drained_strokes",
@@ -371,12 +401,13 @@
                  "replay_strokes_coarse_paint_candidates",
                  "replay_strokes_coarse_paint_deduplicated",
                  "replay_spatial_order",
-                 "replay_spatial_reference_z_min",
-                 "replay_spatial_reference_z_max",
-                 "replay_spatial_reference_position_fallback_used",
-                 "replay_spatial_reference_position_fallback_candidates",
+                 "replay_spatial_current_view_vertical_min",
+                 "replay_spatial_current_view_vertical_max",
+                 "replay_spatial_current_view_projection_fallback_used",
+                 "replay_spatial_current_view_projection_fallback_candidates",
                  "replay_spatial_fallback_order",
                  "replay_spatial_camera_right_available",
+                 "replay_spatial_camera_up_available",
                  "replay_spatial_sort_partitions",
                  "replay_spatial_order_violations",
                  "replay_spatial_sort_elapsed_ms",
@@ -395,6 +426,10 @@
                  "research_artifacts_requested",
              })
         {
+            if (server_packed_fallback && std::string(key) == "local_apply_route")
+            {
+                continue;
+            }
             append_metadata_field(out, metadata, key);
         }
         return out.empty() ? metadata : out;
@@ -438,6 +473,10 @@
                  "server_batch_limit",
                  "server_batch_pacing_ms",
                  "server_batch_delay_ms",
+                 "local_route_mode",
+                 "fallback_reason",
+                 "fallback_batch_limit",
+                 "fallback_pacing_ms",
                  "replication_pacing_enabled",
                  "replication_pacing_control",
                  "replication_pacing_source",

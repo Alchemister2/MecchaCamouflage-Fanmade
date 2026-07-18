@@ -13,7 +13,9 @@ public sealed class HostSession
 
     private static readonly string[] ResetKeys =
     [
+        "paint.brush1Enabled",
         "paint.brush1SizeTexels",
+        "paint.brush2Enabled",
         "paint.brush2SizeTexels",
         "paint.packedBatchLimit",
         "paint.packedBatchPacingMs",
@@ -182,9 +184,11 @@ public sealed class HostSession
                 return new HostCommandResult(true);
             case "paint.geometry":
             case "geometry":
+                next.Paint.Brush1Enabled = defaults.Paint.Brush1Enabled;
                 next.Paint.Brush1SizeTexels = defaults.Paint.Brush1SizeTexels;
+                next.Paint.Brush2Enabled = defaults.Paint.Brush2Enabled;
                 next.Paint.Brush2SizeTexels = defaults.Paint.Brush2SizeTexels;
-                next.Paint.CoverageStepTexels = defaults.Paint.Brush2SizeTexels;
+                next.Paint.CoverageStepTexels = defaults.Paint.CoverageStepTexels;
                 next.Paint.PackedBatchLimit = defaults.Paint.PackedBatchLimit;
                 next.Paint.PackedBatchPacingMs = defaults.Paint.PackedBatchPacingMs;
                 break;
@@ -302,6 +306,9 @@ public sealed class HostSession
                 return new HostCommandResult(false, canceledBeforeDispatch);
             }
             var response = await Runtime.SendPaintAsync(payload, cancellationToken);
+            var fallbackWarning = PaintFallbackWarning(response);
+            if (fallbackWarning is not null)
+                Log.Warn(fallbackWarning);
             var message = FriendlyBridgeMessage(response.Message.Length > 0 ? response.Message : response.Stage);
             if (response.Success)
             {
@@ -588,6 +595,35 @@ public sealed class HostSession
         }
     }
 
+    public static string? PaintFallbackWarning(BridgeReply response)
+    {
+        if (string.IsNullOrWhiteSpace(response.Raw))
+            return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(response.Raw);
+            if (!doc.RootElement.TryGetProperty("metadata", out var metadata) ||
+                metadata.ValueKind != JsonValueKind.Object ||
+                !metadata.TryGetProperty("local_route_mode", out var routeMode) ||
+                routeMode.GetString() != "server_packed_fallback" ||
+                !metadata.TryGetProperty("fallback_reason", out var reasonElement) ||
+                string.IsNullOrWhiteSpace(reasonElement.GetString()) ||
+                !metadata.TryGetProperty("fallback_batch_limit", out var batchElement) ||
+                !batchElement.TryGetInt32(out var batchLimit) ||
+                !metadata.TryGetProperty("fallback_pacing_ms", out var pacingElement) ||
+                !pacingElement.TryGetInt32(out var pacingMs))
+            {
+                return null;
+            }
+
+            return $"{reasonElement.GetString()} (server packed fallback: {batchLimit} strokes / {pacingMs} ms)";
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     public void OpenLogs()
     {
         Directory.CreateDirectory(Paths.DiagnosticsDirectory);
@@ -619,6 +655,11 @@ public sealed class HostSession
     private HostCommandResult CommitSettings(AppSettings next, AppSettings previous)
     {
         next = SettingsStore.Clamp(next);
+        if (!next.Paint.Brush1Enabled && !next.Paint.Brush2Enabled)
+        {
+            Settings = previous;
+            return new HostCommandResult(false, "At least one brush must be enabled.");
+        }
         var hotkeys = HotkeySet.From(next);
         if (!hotkeys.TryValidate(out var message))
         {
@@ -764,7 +805,9 @@ public sealed class HostSession
         var paint = settings.Paint;
         return new SettingsSnapshot(
             new PaintSnapshot(
+                paint.Brush1Enabled,
                 paint.Brush1SizeTexels,
+                paint.Brush2Enabled,
                 paint.Brush2SizeTexels,
                 paint.PackedBatchLimit,
                 paint.PackedBatchPacingMs,
@@ -854,7 +897,9 @@ public sealed class HostSession
         var map = ResetKeys.ToDictionary(key => key, key => !SettingEquals(settings, defaults, key), StringComparer.OrdinalIgnoreCase);
         var sections = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase)
         {
-            ["paint.geometry"] = map["paint.brush1SizeTexels"] || map["paint.brush2SizeTexels"] || map["paint.packedBatchLimit"] || map["paint.packedBatchPacingMs"],
+            ["paint.geometry"] = map["paint.brush1Enabled"] || map["paint.brush1SizeTexels"] ||
+                                 map["paint.brush2Enabled"] || map["paint.brush2SizeTexels"] ||
+                                 map["paint.packedBatchLimit"] || map["paint.packedBatchPacingMs"],
             ["paint.material"] = map["paint.autoMaterial"] || map["paint.metallic"] || map["paint.roughness"],
             ["regions"] = map["paint.frontRegionMode"] || map["paint.sideRegionMode"] || map["paint.backRegionMode"],
             ["fill.material"] = map["paint.fillColor"] || map["paint.fillMetallic"] || map["paint.fillRoughness"],
@@ -866,7 +911,9 @@ public sealed class HostSession
 
     private static bool SettingEquals(AppSettings left, AppSettings right, string key) => key switch
     {
+        "paint.brush1Enabled" => left.Paint.Brush1Enabled == right.Paint.Brush1Enabled,
         "paint.brush1SizeTexels" => Nearly(left.Paint.Brush1SizeTexels, right.Paint.Brush1SizeTexels),
+        "paint.brush2Enabled" => left.Paint.Brush2Enabled == right.Paint.Brush2Enabled,
         "paint.brush2SizeTexels" => Nearly(left.Paint.Brush2SizeTexels, right.Paint.Brush2SizeTexels),
         "paint.packedBatchLimit" => left.Paint.PackedBatchLimit == right.Paint.PackedBatchLimit,
         "paint.packedBatchPacingMs" => left.Paint.PackedBatchPacingMs == right.Paint.PackedBatchPacingMs,
@@ -894,10 +941,12 @@ public sealed class HostSession
     {
         switch (key)
         {
+            case "paint.brush1Enabled": settings.Paint.Brush1Enabled = defaults.Paint.Brush1Enabled; break;
             case "paint.brush1SizeTexels": settings.Paint.Brush1SizeTexels = defaults.Paint.Brush1SizeTexels; break;
+            case "paint.brush2Enabled": settings.Paint.Brush2Enabled = defaults.Paint.Brush2Enabled; break;
             case "paint.brush2SizeTexels":
                 settings.Paint.Brush2SizeTexels = defaults.Paint.Brush2SizeTexels;
-                settings.Paint.CoverageStepTexels = defaults.Paint.Brush2SizeTexels;
+                settings.Paint.CoverageStepTexels = SettingsStore.CoverageStepFor(settings.Paint);
                 break;
             case "paint.packedBatchLimit": settings.Paint.PackedBatchLimit = defaults.Paint.PackedBatchLimit; break;
             case "paint.packedBatchPacingMs": settings.Paint.PackedBatchPacingMs = defaults.Paint.PackedBatchPacingMs; break;
@@ -926,10 +975,12 @@ public sealed class HostSession
     {
         switch (key)
         {
+            case "paint.brush1Enabled": settings.Paint.Brush1Enabled = value.GetBoolean(); break;
             case "paint.brush1SizeTexels": settings.Paint.Brush1SizeTexels = value.GetDouble(); break;
+            case "paint.brush2Enabled": settings.Paint.Brush2Enabled = value.GetBoolean(); break;
             case "paint.brush2SizeTexels":
                 settings.Paint.Brush2SizeTexels = value.GetDouble();
-                settings.Paint.CoverageStepTexels = settings.Paint.Brush2SizeTexels;
+                settings.Paint.CoverageStepTexels = SettingsStore.CoverageStepFor(settings.Paint);
                 break;
             case "paint.packedBatchLimit": settings.Paint.PackedBatchLimit = RoundedInteger(value); break;
             case "paint.packedBatchPacingMs": settings.Paint.PackedBatchPacingMs = RoundedInteger(value); break;

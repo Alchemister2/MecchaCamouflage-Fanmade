@@ -68,6 +68,9 @@ These require MECCHA CHAMELEON.
   - repeated unpreview shows a guard warning.
   - cancel with no active paint shows a guard warning.
   - normal paint completes.
+  - with any one region set to Fill, the initial fixed-100 Fill pass covers
+    Front, Side, and Back (including Paint/Skip regions), then enabled Brushes
+    overwrite only Paint regions.
   - progress shows packed pacing and queue/drain data.
 - Delete the LocalAppData runtime cache and restart.
   - cache rebuilds automatically.
@@ -116,17 +119,24 @@ Collect these separately for painter-as-host and painter-as-joining-client:
   - `PaintAtUVWithBrush == 0`
   - legacy full-stroke multicast calls are `0`
 - production-route metadata:
-  - `local_packed_queue_resolver_status == "resolved"`
-  - `local_packed_queue_exact_manager_class_ok == true`
-  - packed/local batch boundaries and stroke totals are identical
-  - `local_packed_queue_strokes_submitted == server_strokes_sent`
-  - `local_packed_queue_delta_mismatches == 0`
-  - `local_packed_queue_call_exceptions == 0`
-  - `server_local_diverged == false` on interrupted runs
-  - `packed_mesh_radius_calibration_ok == true`
-  - `packed_mesh_radius_calibration_invalid_triangles == 0`
-  - the effective scale, mesh bounds diameter, and weighted local/UV scale are
-    finite and identical for server/local construction of the job
+  - either the local route resolves uniquely, or
+    `local_route_mode == "server_packed_fallback"`
+  - for the local route:
+    - `local_packed_queue_exact_manager_class_ok == true`
+    - packed/local batch boundaries and stroke totals are identical
+    - `local_packed_queue_strokes_submitted == server_strokes_sent`
+    - `local_packed_queue_delta_mismatches == 0`
+    - `local_packed_queue_call_exceptions == 0`
+    - `server_local_diverged == false` on interrupted runs
+  - for fallback:
+    - `fallback_reason` preserves the triggering local error
+    - `fallback_batch_limit == 20`
+    - `fallback_pacing_ms == 50`
+    - no local enqueue or local queue-drain phase starts after fallback
+  - `packed_mesh_radius_scale_effective == 1.0` in production
+  - `packed_mesh_radius_scale_source == production_triangle_world_radius_per_stroke`
+  - `replay_triangle_world_radius_normalization == per_stroke`
+  - packed mesh-average calibration is not required and cannot block production paint
   - per-pass effective subdivision level/pixel-size/template-resolution are
     all zero sentinels before packed decode
 - before/after texture probes show a nontrivial changed-texel area on the

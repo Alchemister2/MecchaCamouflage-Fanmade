@@ -1,5 +1,5 @@
 param(
-    [string]$RuntimeRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
+    [string]$RuntimeRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).ProviderPath,
     [string]$OutDir = (Join-Path $env:LOCALAPPDATA "MecchaResearch\replication-runner")
 )
 
@@ -27,16 +27,31 @@ function Invoke-VsCommand([string]$CommandLine) {
     if (-not (Test-Path $devCmd)) {
         throw "Visual Studio developer command script not found: $devCmd"
     }
-    cmd.exe /d /c "call `"$devCmd`" -arch=x64 -host_arch=x64 >nul && $CommandLine"
-    if ($LASTEXITCODE -ne 0) {
-        throw "Visual Studio command failed with exit code $LASTEXITCODE"
+    $location = Get-Location
+    $changedLocation = $location.ProviderPath.StartsWith("\\")
+    try {
+        if ($changedLocation) {
+            Push-Location ([System.IO.Path]::GetTempPath())
+        }
+        cmd.exe /d /c "call `"$devCmd`" -arch=x64 -host_arch=x64 >nul && $CommandLine"
+        if ($LASTEXITCODE -ne 0) {
+            throw "Visual Studio command failed with exit code $LASTEXITCODE"
+        }
+    }
+    finally {
+        if ($changedLocation) {
+            Pop-Location
+        }
     }
 }
 
-$RuntimeRoot = (Resolve-Path $RuntimeRoot).Path
+$RuntimeRoot = [System.IO.Path]::GetFullPath(
+    (Resolve-Path -LiteralPath $RuntimeRoot).ProviderPath
+)
 $OutDir = Assert-SafeOutputDirectory $OutDir
 $NativeDir = Join-Path $OutDir "native"
 $RunnerDir = Join-Path $OutDir "runner"
+$DotNetArtifactsDir = Join-Path $OutDir "dotnet-artifacts"
 $BridgeSource = Join-Path $RuntimeRoot "src\native\bridge\bridge.cpp"
 $InjectorSource = Join-Path $RuntimeRoot "src\native\injector\injector.cpp"
 $TransformValidationTestSource = Join-Path $RuntimeRoot "src\native\tests\transform_validation_test.cpp"
@@ -63,8 +78,17 @@ if ($LASTEXITCODE -ne 0) {
 Invoke-VsCommand "cl.exe /nologo /std:c++17 /EHsc /O2 /LD `"$BridgeSource`" /Fo:`"$(Join-Path $OutDir 'bridge.obj')`" /Fe:`"$BridgeOutput`" Ws2_32.lib User32.lib /link /Brepro"
 Invoke-VsCommand "cl.exe /nologo /EHsc /O2 `"$InjectorSource`" /Fo:`"$(Join-Path $OutDir 'injector.obj')`" /Fe:`"$InjectorOutput`" /link /Brepro"
 
+& dotnet build $WebHostProject -c Release -r win-x64 --no-incremental `
+    "/p:MecchaAppVersion=research-issue87" `
+    "/p:MecchaDotNetArtifactRoot=$DotNetArtifactsDir" `
+    "/p:MecchaResearchBuild=true"
+if ($LASTEXITCODE -ne 0) {
+    throw "dotnet build failed with exit code $LASTEXITCODE"
+}
+
 & dotnet publish $WebHostProject -c Release -r win-x64 --self-contained true -o $RunnerDir `
     "/p:MecchaAppVersion=research-issue87" `
+    "/p:MecchaDotNetArtifactRoot=$DotNetArtifactsDir" `
     "/p:MecchaResearchBuild=true" `
     "/p:MecchaNativeRuntimeDir=$NativeDir" `
     "/p:MecchaMeshProfilesDir=$MeshProfilesDir" `

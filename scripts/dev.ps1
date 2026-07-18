@@ -1,5 +1,5 @@
 param(
-    [string]$RuntimeRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
+    [string]$RuntimeRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).ProviderPath,
     [string]$BuildOutputDir = ".build\bin",
     [string]$ExeName = "meccha-camouflage.exe",
     [string[]]$RuntimeArgs,
@@ -28,7 +28,9 @@ function Resolve-RuntimeExe {
     else {
         Join-Path (Join-Path $RuntimeRoot $BuildOutputDir) "$RuntimeName.exe"
     }
-    if (Test-Path $candidate) { return (Resolve-Path $candidate).Path }
+    if (Test-Path -LiteralPath $candidate) {
+        return (Resolve-Path -LiteralPath $candidate).ProviderPath
+    }
     return ""
 }
 
@@ -87,6 +89,10 @@ function Invoke-ForegroundRuntime {
     }
     if ($LASTEXITCODE -ne 0) { throw "runtime execution failed with exit code $LASTEXITCODE." }
 }
+
+$RuntimeRoot = [System.IO.Path]::GetFullPath(
+    (Resolve-Path -LiteralPath $RuntimeRoot).ProviderPath
+)
 
 if ($RuntimeArgString) {
     $stringArgs = Convert-RuntimeArgString -RuntimeArgString $RuntimeArgString

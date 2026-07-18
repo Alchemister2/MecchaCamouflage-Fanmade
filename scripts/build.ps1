@@ -1,5 +1,5 @@
 param(
-    [string]$RuntimeRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
+    [string]$RuntimeRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).ProviderPath,
     [string]$OutDir = "",
     [string]$ExeName = "meccha-camouflage",
     [string]$Version = "",
@@ -48,24 +48,41 @@ function Get-VsDevCmd {
     return ""
 }
 
+function Push-NativeToolWorkingDirectory {
+    $location = Get-Location
+    $providerPath = $location.ProviderPath
+    $isWindows = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+    if ($isWindows -and $providerPath.StartsWith("\\")) {
+        Push-Location ([System.IO.Path]::GetTempPath())
+        return $true
+    }
+    return $false
+}
+
 function Invoke-VsToolCommand {
     param(
         [Parameter(Mandatory = $true)][string]$ToolName,
         [Parameter(Mandatory = $true)][string[]]$ToolArgs
     )
-    if (Get-Command $ToolName -ErrorAction SilentlyContinue) {
-        & $ToolName @ToolArgs
+    $pushed = Push-NativeToolWorkingDirectory
+    try {
+        if (Get-Command $ToolName -ErrorAction SilentlyContinue) {
+            & $ToolName @ToolArgs
+            if ($LASTEXITCODE -ne 0) { throw "$ToolName failed with exit code $LASTEXITCODE" }
+            return
+        }
+        $VsDevCmd = Get-VsDevCmd
+        if (-not $VsDevCmd) {
+            throw "$ToolName was not found. Install Visual Studio 2022 Build Tools or run from a VS Developer PowerShell."
+        }
+        $ArgText = ($ToolArgs | ForEach-Object { Quote-CmdArg $_ }) -join " "
+        $CommandLine = "$(Quote-CmdArg $VsDevCmd) -arch=x64 -host_arch=x64 >nul && $ToolName $ArgText"
+        cmd /d /c $CommandLine
         if ($LASTEXITCODE -ne 0) { throw "$ToolName failed with exit code $LASTEXITCODE" }
-        return
     }
-    $VsDevCmd = Get-VsDevCmd
-    if (-not $VsDevCmd) {
-        throw "$ToolName was not found. Install Visual Studio 2022 Build Tools or run from a VS Developer PowerShell."
+    finally {
+        if ($pushed) { Pop-Location }
     }
-    $ArgText = ($ToolArgs | ForEach-Object { Quote-CmdArg $_ }) -join " "
-    $CommandLine = "$(Quote-CmdArg $VsDevCmd) -arch=x64 -host_arch=x64 >nul && $ToolName $ArgText"
-    cmd /d /c $CommandLine
-    if ($LASTEXITCODE -ne 0) { throw "$ToolName failed with exit code $LASTEXITCODE" }
 }
 
 function Invoke-VsToolCapture {
@@ -73,20 +90,26 @@ function Invoke-VsToolCapture {
         [Parameter(Mandatory = $true)][string]$ToolName,
         [Parameter(Mandatory = $true)][string[]]$ToolArgs
     )
-    if (Get-Command $ToolName -ErrorAction SilentlyContinue) {
-        $output = & $ToolName @ToolArgs 2>&1
+    $pushed = Push-NativeToolWorkingDirectory
+    try {
+        if (Get-Command $ToolName -ErrorAction SilentlyContinue) {
+            $output = & $ToolName @ToolArgs 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "$ToolName failed with exit code $LASTEXITCODE`n$output" }
+            return $output
+        }
+        $VsDevCmd = Get-VsDevCmd
+        if (-not $VsDevCmd) {
+            throw "$ToolName was not found. Install Visual Studio 2022 Build Tools or run from a VS Developer PowerShell."
+        }
+        $ArgText = ($ToolArgs | ForEach-Object { Quote-CmdArg $_ }) -join " "
+        $CommandLine = "$(Quote-CmdArg $VsDevCmd) -arch=x64 -host_arch=x64 >nul && $ToolName $ArgText"
+        $output = cmd /d /c $CommandLine 2>&1
         if ($LASTEXITCODE -ne 0) { throw "$ToolName failed with exit code $LASTEXITCODE`n$output" }
         return $output
     }
-    $VsDevCmd = Get-VsDevCmd
-    if (-not $VsDevCmd) {
-        throw "$ToolName was not found. Install Visual Studio 2022 Build Tools or run from a VS Developer PowerShell."
+    finally {
+        if ($pushed) { Pop-Location }
     }
-    $ArgText = ($ToolArgs | ForEach-Object { Quote-CmdArg $_ }) -join " "
-    $CommandLine = "$(Quote-CmdArg $VsDevCmd) -arch=x64 -host_arch=x64 >nul && $ToolName $ArgText"
-    $output = cmd /d /c $CommandLine 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "$ToolName failed with exit code $LASTEXITCODE`n$output" }
-    return $output
 }
 
 function Get-ExeBaseName {
@@ -107,7 +130,7 @@ function Invoke-DotNet {
 function Clear-DirectoryContents {
     param([Parameter(Mandatory = $true)][string]$Path)
     New-Item -ItemType Directory -Force -Path $Path | Out-Null
-    $full = (Resolve-Path $Path).Path.TrimEnd("\", "/")
+    $full = (Resolve-Path -LiteralPath $Path).ProviderPath.TrimEnd("\", "/")
     $root = [System.IO.Path]::GetPathRoot($full).TrimEnd("\", "/")
     if ($full -eq $root) {
         throw "Refusing to clear filesystem root: $full"
@@ -191,6 +214,9 @@ function Invoke-BuildStep {
 }
 
 $BuildTotalTimer = [System.Diagnostics.Stopwatch]::StartNew()
+$RuntimeRoot = [System.IO.Path]::GetFullPath(
+    (Resolve-Path -LiteralPath $RuntimeRoot).ProviderPath
+)
 $Version = Resolve-ProjectVersion -Requested $Version -Root $RuntimeRoot
 $ExeName = Get-ExeBaseName -Name $ExeName
 Write-Host "Build version: $Version"
@@ -204,8 +230,12 @@ if (-not $OutDir) {
         Join-Path $RuntimeRoot ".build\bin"
     }
 }
+elseif (-not [System.IO.Path]::IsPathRooted($OutDir)) {
+    $OutDir = Join-Path $RuntimeRoot $OutDir
+}
 $OutDir = [System.IO.Path]::GetFullPath($OutDir)
 $ObjDir = Join-Path $RuntimeRoot ".build\obj"
+$DotNetArtifactRoot = Join-Path $RuntimeRoot ".build\dotnet-windows"
 $NativePackageDir = Join-Path $ObjDir "package-native"
 $WebView2EvergreenBootstrapperUrl = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
 $WebView2BootstrapperCacheRoot = Join-Path $RuntimeRoot ".build\cache\webview2\evergreen"
@@ -238,7 +268,14 @@ $WebView2BootstrapperPath = Invoke-BuildStep -Name "prepare WebView2 Evergreen b
 Push-Location $RuntimeRoot
 try {
     Invoke-BuildStep -Name "run C# tests" -ScriptBlock {
-        Invoke-DotNet -Arguments @("run", "--project", $TestsProject, "-c", "Release")
+        Invoke-DotNet -Arguments @(
+            "build", $TestsProject, "-c", "Release", "--no-incremental",
+            "/p:MecchaDotNetArtifactRoot=$DotNetArtifactRoot"
+        )
+        Invoke-DotNet -Arguments @(
+            "run", "--project", $TestsProject, "-c", "Release", "--no-build",
+            "/p:MecchaDotNetArtifactRoot=$DotNetArtifactRoot"
+        )
     }
 
     $TransformValidationTestOutput = Join-Path $ObjDir "transform-validation-test.exe"
@@ -300,6 +337,7 @@ try {
             "--self-contained", "true",
             "-o", $OutDir,
             "/p:MecchaAppVersion=$Version",
+            "/p:MecchaDotNetArtifactRoot=$DotNetArtifactRoot",
             "/p:MecchaNativeRuntimeDir=$NativePackageDir",
             "/p:MecchaMeshProfilesDir=$MeshProfilesSourceDir",
             "/p:MecchaWebView2BootstrapperPath=$WebView2BootstrapperPath"

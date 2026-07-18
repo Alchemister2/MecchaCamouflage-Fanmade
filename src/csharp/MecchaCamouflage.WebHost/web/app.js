@@ -265,7 +265,9 @@ function statusClass(value) {
 
 function renderSettings(snapshot) {
   const paint = snapshot.settings.paint;
+  setChecked("brush-1-enabled", paint.brush1Enabled);
   setNumberPair("brush-1-size", "brush-1-size-number", paint.brush1SizeTexels);
+  setChecked("brush-2-enabled", paint.brush2Enabled);
   setNumberPair("brush-2-size", "brush-2-size-number", paint.brush2SizeTexels);
   setNumberPair("packed-batch-limit", "packed-batch-limit-number", paint.packedBatchLimit);
   setNumberPair("packed-batch-pacing", "packed-batch-pacing-number", paint.packedBatchPacingMs);
@@ -309,6 +311,15 @@ function renderSettings(snapshot) {
 
   const materialLocked = paint.autoMaterial || !editing;
   setDisabled(["metallic", "metallic-number", "roughness", "roughness-number"], materialLocked);
+
+  setDisabled([
+    "brush-1-size",
+    "brush-1-size-number"
+  ], !editing || !paint.brush1Enabled);
+  setDisabled([
+    "brush-2-size",
+    "brush-2-size-number"
+  ], !editing || !paint.brush2Enabled);
 
   setDisabled([
     "packed-batch-limit",
@@ -442,6 +453,11 @@ async function saveDraft() {
   if (!editing || !liveSnapshot || !draftSnapshot) {
     return;
   }
+  const paint = draftSnapshot.settings.paint;
+  if (!paint.brush1Enabled && !paint.brush2Enabled) {
+    showError("At least one brush must be enabled.");
+    return;
+  }
   const changes = diffSnapshots(liveSnapshot, draftSnapshot);
   if (changes.length === 0) {
     cancelEdit();
@@ -536,7 +552,9 @@ function snapshotPath(key) {
 function diffSnapshots(before, after) {
   const keys = [
     "app.language",
+    "paint.brush1Enabled",
     "paint.brush1SizeTexels",
+    "paint.brush2Enabled",
     "paint.brush2SizeTexels",
     "paint.packedBatchLimit",
     "paint.packedBatchPacingMs",
@@ -746,7 +764,9 @@ function toast(message, level = "success") {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  bindCheckbox("brush-1-enabled", "paint.brush1Enabled");
   bindRangePair("brush-1-size", "brush-1-size-number", "paint.brush1SizeTexels");
+  bindCheckbox("brush-2-enabled", "paint.brush2Enabled");
   bindRangePair("brush-2-size", "brush-2-size-number", "paint.brush2SizeTexels");
   bindRangePair("packed-batch-limit", "packed-batch-limit-number", "paint.packedBatchLimit");
   bindRangePair("packed-batch-pacing", "packed-batch-pacing-number", "paint.packedBatchPacingMs");

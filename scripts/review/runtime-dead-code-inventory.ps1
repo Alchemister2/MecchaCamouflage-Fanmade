@@ -1,5 +1,5 @@
 param(
-    [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path,
+    [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).ProviderPath,
     [string]$OutDir = ""
 )
 
@@ -151,9 +151,14 @@ function Invoke-OptionalReport {
     Write-Utf8Lines -Path (Join-Path $OutDir $OutputFile) -Lines $lines
 }
 
-$RepoRoot = [System.IO.Path]::GetFullPath($RepoRoot)
+$RepoRoot = [System.IO.Path]::GetFullPath(
+    (Resolve-Path -LiteralPath $RepoRoot).ProviderPath
+)
 if ([string]::IsNullOrWhiteSpace($OutDir)) {
     $OutDir = Join-Path $RepoRoot "artifacts/review/runtime-dead-code"
+}
+elseif (-not [System.IO.Path]::IsPathRooted($OutDir)) {
+    $OutDir = Join-Path $RepoRoot $OutDir
 }
 $OutDir = [System.IO.Path]::GetFullPath($OutDir)
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null

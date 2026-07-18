@@ -48,18 +48,10 @@ public sealed class SettingsStore
         settings.LogRetentionDays = ReadInt(root, "log_retention_days", settings.LogRetentionDays);
 
         var paint = settings.Paint;
+        paint.Brush1Enabled = ReadBool(root, "brush_1_enabled", paint.Brush1Enabled);
         paint.Brush1SizeTexels = ReadDouble(root, "brush_1_size_texels", paint.Brush1SizeTexels);
-        if (root.TryGetPropertyValue("brush_2_size_texels", out var brush2Value) && brush2Value is not null)
-        {
-            paint.Brush2SizeTexels = brush2Value.GetValue<double>();
-        }
-        else if (root.TryGetPropertyValue("stroke_size_texels", out var legacyStrokeValue) && legacyStrokeValue is not null)
-        {
-            var legacyStrokeSize = legacyStrokeValue.GetValue<double>();
-            paint.Brush2SizeTexels = settings.LayoutVersion <= 36 && Math.Abs(legacyStrokeSize - 5.0) < 0.000001
-                ? 10.0
-                : legacyStrokeSize;
-        }
+        paint.Brush2Enabled = ReadBool(root, "brush_2_enabled", paint.Brush2Enabled);
+        paint.Brush2SizeTexels = ReadDouble(root, "brush_2_size_texels", paint.Brush2SizeTexels);
         var hasLegacyPacingMode =
             root.TryGetPropertyValue("pacing_mode", out var legacyPacingModeValue) &&
             legacyPacingModeValue is not null;
@@ -84,7 +76,7 @@ public sealed class SettingsStore
                 _ when !hasLegacyPacingMode && hasLegacyBatchDelay => legacyBatchDelayMs,
                 _ => 50
             });
-        paint.CoverageStepTexels = paint.Brush2SizeTexels;
+        paint.CoverageStepTexels = CoverageStepFor(paint);
         paint.SideSourceMaxUv = ReadDouble(root, "side_source_max_uv", paint.SideSourceMaxUv);
         paint.FrontBackSourceMaxUv = ReadDouble(root, "front_back_source_max_uv", paint.FrontBackSourceMaxUv);
         paint.FrontRegionMode = ReadRegionMode(root, "front_region_mode", paint.FrontRegionMode);
@@ -135,11 +127,11 @@ public sealed class SettingsStore
         if (string.IsNullOrWhiteSpace(settings.StopHotkey))
             settings.StopHotkey = "F4";
 
-        settings.Paint.Brush1SizeTexels = Math.Clamp(settings.Paint.Brush1SizeTexels, 10.0, 30.0);
-        settings.Paint.Brush2SizeTexels = Math.Clamp(settings.Paint.Brush2SizeTexels, 5.0, 10.0);
-        settings.Paint.PackedBatchLimit = Math.Clamp(settings.Paint.PackedBatchLimit, 1, 20);
-        settings.Paint.PackedBatchPacingMs = Math.Clamp(settings.Paint.PackedBatchPacingMs, 50, 500);
-        settings.Paint.CoverageStepTexels = settings.Paint.Brush2SizeTexels;
+        settings.Paint.Brush1SizeTexels = Math.Clamp(settings.Paint.Brush1SizeTexels, 10.0, 50.0);
+        settings.Paint.Brush2SizeTexels = Math.Clamp(settings.Paint.Brush2SizeTexels, 1.0, 10.0);
+        settings.Paint.PackedBatchLimit = Math.Clamp(settings.Paint.PackedBatchLimit, 1, 500);
+        settings.Paint.PackedBatchPacingMs = Math.Clamp(settings.Paint.PackedBatchPacingMs, 1, 500);
+        settings.Paint.CoverageStepTexels = CoverageStepFor(settings.Paint);
         settings.Paint.SideSourceMaxUv = Math.Clamp(settings.Paint.SideSourceMaxUv, 0.001, 0.50);
         settings.Paint.FrontBackSourceMaxUv = Math.Clamp(settings.Paint.FrontBackSourceMaxUv, 0.001, 2.00);
         settings.Paint.Metallic = Math.Clamp(settings.Paint.Metallic, 0.0, 1.0);
@@ -166,7 +158,9 @@ public sealed class SettingsStore
         preview_hotkey = settings.PreviewHotkey,
         unpreview_hotkey = settings.UnPreviewHotkey,
         stop_hotkey = settings.StopHotkey,
+        brush_1_enabled = settings.Paint.Brush1Enabled,
         brush_1_size_texels = settings.Paint.Brush1SizeTexels,
+        brush_2_enabled = settings.Paint.Brush2Enabled,
         brush_2_size_texels = settings.Paint.Brush2SizeTexels,
         packed_batch_limit = settings.Paint.PackedBatchLimit,
         packed_batch_pacing_ms = settings.Paint.PackedBatchPacingMs,
@@ -183,6 +177,15 @@ public sealed class SettingsStore
         fill_metallic = settings.Paint.FillMetallic,
         fill_roughness = settings.Paint.FillRoughness
     };
+
+    public static double CoverageStepFor(PaintSettings paint)
+    {
+        if (paint.Brush1Enabled && paint.Brush2Enabled)
+            return Math.Min(paint.Brush1SizeTexels, paint.Brush2SizeTexels);
+        if (paint.Brush1Enabled)
+            return paint.Brush1SizeTexels;
+        return paint.Brush2SizeTexels;
+    }
 
     public static string RegionModeText(RegionMode mode) => mode switch
     {

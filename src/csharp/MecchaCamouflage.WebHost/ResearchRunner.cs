@@ -753,9 +753,10 @@ internal static class ResearchRunner
         var paint = SettingsStore.Clamp(settings).Paint;
         return new
         {
+            brush_1_enabled = paint.Brush1Enabled,
             brush_1_size_texels = paint.Brush1SizeTexels,
+            brush_2_enabled = paint.Brush2Enabled,
             brush_2_size_texels = paint.Brush2SizeTexels,
-            brush_pipeline_version = 2,
             packed_batch_limit = paint.PackedBatchLimit,
             packed_batch_pacing_ms = paint.PackedBatchPacingMs,
             coverage_step_texels = paint.CoverageStepTexels,
@@ -933,9 +934,9 @@ internal static class ResearchRunner
         {
             if (!int.TryParse(packedBatchLimitText, NumberStyles.None, CultureInfo.InvariantCulture,
                               out var parsedPackedBatchLimit) ||
-                parsedPackedBatchLimit < 1 || parsedPackedBatchLimit > 20)
+                parsedPackedBatchLimit < 1 || parsedPackedBatchLimit > 500)
             {
-                throw new ArgumentException("--batch-limit must be an integer from 1 through 20.");
+                throw new ArgumentException("--batch-limit must be an integer from 1 through 500.");
             }
             packedBatchLimitOverride = parsedPackedBatchLimit;
         }
@@ -945,9 +946,9 @@ internal static class ResearchRunner
         {
             if (!int.TryParse(packedBatchPacingText, NumberStyles.None, CultureInfo.InvariantCulture,
                               out var parsedPackedBatchPacingMs) ||
-                parsedPackedBatchPacingMs < 50 || parsedPackedBatchPacingMs > 500)
+                parsedPackedBatchPacingMs < 1 || parsedPackedBatchPacingMs > 500)
             {
-                throw new ArgumentException("--batch-pacing-ms must be an integer from 50 through 500.");
+                throw new ArgumentException("--batch-pacing-ms must be an integer from 1 through 500.");
             }
             packedBatchPacingOverrideMs = parsedPackedBatchPacingMs;
         }

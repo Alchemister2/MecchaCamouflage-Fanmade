@@ -28,25 +28,43 @@ research build script when those capabilities are required.
 Normal multiplayer paint uses a paired packed route:
 
 - `RuntimePaintableComponent.ServerPackedPaintBatch` sends the server batch.
-- The painter's local game-owned packed receiver queue receives the same packed
-  batch boundaries and cadence through the exact-build native receiver path.
-- Each paired commit is fail-closed: resolver, payload, queue, and component
-  continuity checks must pass before the first stroke is sent.
+- When its reflected schema and one unique machine-code/call-chain candidate
+  resolve, the painter's local game-owned packed receiver queue receives the
+  same packed batch boundaries and cadence.
+- The game module identity and resolved RVAs are diagnostics, not version gates.
+- If that local route or its exact component queue cannot be measured, no local
+  receiver call is made. `ServerPackedPaintBatch` continues at the fixed
+  fallback rate of 20 strokes / 50 ms.
 - No automatic fallback is allowed to reflected `PaintAtUVWithBrush`, the
   legacy per-stroke internal-common route, compact/adaptive routes, or a
   texture-sync route.
-- Batch controls range from 1--20 strokes and 50--500 ms. The default is
+- Batch controls range from 1--500 strokes and 1--500 ms. The default is
   20 strokes / 50 ms.
 
-The planner produces `Fill -> Brush 1 -> Brush 2`; no packed batch crosses a
-pass boundary. Brush 1 ranges from 10--30 texels and defaults to 30. Brush 2
-ranges from 5--10 texels. Coverage is intentionally synchronized to Brush 2:
-setting Brush 2 to 5 also sets coverage to 5.
+Brush 1 and Brush 2 are independently enabled. Brush 1 ranges from 10--50
+texels, defaults to 25, and defaults OFF. Brush 2 ranges from 1--10 texels,
+defaults to 5, and defaults ON. At least one brush must remain enabled. The
+planner emits one 100-texel Fill pass over all mesh regions if any region
+selects `Fill`, including regions configured as Paint or Skip. It then emits
+only the enabled paint passes for Paint regions in Brush 1 then Brush 2 order.
+Coverage uses the smallest enabled brush. No packed batch crosses a pass
+boundary. Within each pass, samples from all mesh regions are ordered from the
+top of the current camera view to the bottom using the current skinned-pose
+world positions; the profile reference pose is not used for replay order.
 
-Completion means that the initiating client's local game queue drained. It
-does **not** prove that a joining client has presented its final pixels. The UI
-therefore says that joined clients may still be rendering after a host-side
-completion.
+Production preserves the configured packed-wire UV radius at scale `1.0`. Each
+mesh-anchor stroke derives its effective world radius from its own cached
+triangle's UV-to-world Jacobian and serializes that value per stroke; a batch
+does not reuse its largest triangle radius. A live Brush 2 size-5 check changed
+74 texels, compared with 21 for the game bounds sentinel at scale 1.0 and 517
+for the old uniform 3.5 wire scale. Uniform scale and mesh-average calibration
+remain research-only A/B controls and cannot block normal paint.
+
+On the local route, completion means that the initiating client's local game
+queue drained. In server fallback, completion and progress mean server batch
+submission completed and there is no local queue-drain phase. Neither result
+proves that a joining client has presented its final pixels. The UI therefore
+says that joined clients may still be rendering after a host-side completion.
 
 ## Bounded Cancellation
 
@@ -55,6 +73,9 @@ Cancellation is designed to stop future work, not to rewrite game state:
 - Before each paired server/local commit, the exact local component queue is
   read. Only enough strokes to keep `queued + nextBatch <= configuredBatchLimit`
   are submitted.
+- If a precommit route/queue probe becomes unavailable, future local enqueue is
+  disabled and unsent server batches continue at 20/50. Already submitted local
+  work is not rewritten or purged.
 - Once a cancel is latched, no later server RPC or local enqueue starts.
 - Already committed work, at most one configured batch ahead locally, drains
   naturally through the game queue before the terminal result is emitted.

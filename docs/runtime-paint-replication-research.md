@@ -17,27 +17,31 @@ Normal paint uses the direct component route:
 - painter-side submission through the native packed receiver implementation
   behind `MulticastPackedPaintBatch`, called directly rather than through the
   reflected multicast UFunction
-- identical server/local packed boundaries and pacing (1--20 strokes,
-  50--500 ms; default 20/50)
-- exact PE/text identity plus reflected payload, UFunction thunk, vtable slot,
-  decoder, component-to-manager resolver, and enqueue-chain validation before
-  the first packed submission
-- one packed-radius scale is derived per validated mesh/job from the
-  UV-area-weighted world-triangle/UV Jacobian and live mesh bounds diameter,
-  then multiplied by the host-A/B conservative fold/seam safety factor; it is
-  frozen across Fill/Coarse/Fine and does not change planner spacing
-- mesh-anchor `EffectiveBrushWorldRadius` remains the non-positive conversion
-  sentinel. Compact expansion derives the world radius only for `<= 0`;
-  copying normalized UV radius here collapses strokes to dots
+- identical server/local packed boundaries and pacing (1--500 strokes,
+  1--500 ms; default 20/50), bounded at runtime by readable game limits
+- reflected payload layout plus a unique machine-code/call-chain resolution of
+  the UFunction thunk, vtable slot, decoder, component-to-manager resolver, and
+  enqueue chain before the first local packed submission; PE/text identity is
+  diagnostic metadata rather than a version gate
+- packed-wire UV radius scale `1.0`; each Fill/Brush 1/Brush 2 anchor derives a
+  world radius from that triangle's UV-to-world Jacobian and serializes it per
+  stroke, without sharing the batch maximum
+- the non-positive `EffectiveBrushWorldRadius` conversion sentinel remains only
+  for uniform-scale research A/B runs. Copying the normalized UV radius into
+  this world-unit field still collapses strokes to dots
 - the effective subdivision tail is exactly `level=0`, `pixel-size=0`,
   `template-resolution=0`, allowing receiver preflight to select the component
   defaults. These fields are not brush diameter bytes
 - an exact manager/component queue probe before every server commit and an
   exact queue-count increase after the paired local receiver call
+- if the local receiver route or exact queue becomes unavailable, local calls
+  stop and `ServerPackedPaintBatch` continues at the fixed 20 strokes / 50 ms
+  fallback rate
 - no fallback to old compact/adaptive `SendCustom` path
 - no fallback to the per-stroke internal common or reflected
   `PaintAtUVWithBrush` routes when validation fails
-- failure stops paint with explicit metadata
+- server packed schema/payload/source-ID failure still stops paint with explicit
+  metadata
 
 `local_packed_queue_calls_returned` proves only that the receiver implementation
 returned. `local_packed_queue_last_queue_delta` proves observed queue growth on

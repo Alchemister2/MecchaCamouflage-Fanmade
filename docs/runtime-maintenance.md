@@ -103,14 +103,18 @@ directory.
 
 ## Paint Replication Rules
 
-Normal paint uses the packed component route plus the validated native packed
-receiver queue for painter-local submission. Do not invoke the reflected
-multicast UFunction for local application, and do not reintroduce automatic
-fallback to the per-stroke internal-common, compact/adaptive/send-custom, or
-reflected `PaintAtUVWithBrush` routes.
+Normal paint uses the packed component route plus the dynamically validated
+native packed receiver queue for painter-local submission. Do not invoke the
+reflected multicast UFunction for local application, and do not reintroduce
+automatic fallback to the per-stroke internal-common,
+compact/adaptive/send-custom, or reflected `PaintAtUVWithBrush` routes.
 
-If either half of the route cannot be prepared, fail with diagnostic metadata
-before the first packed submission instead of silently changing routes.
+The server schema, packed payload, and source ID remain fatal requirements. If
+only the local route or exact local queue is unavailable, stop local calls and
+continue `ServerPackedPaintBatch` at 20 strokes / 50 ms. Preserve
+`local_route_mode`, `fallback_reason`, `fallback_batch_limit`, and
+`fallback_pacing_ms` metadata. A readable nonzero queue from a previous job is
+still a blocking condition.
 
 When changing replication behavior, verify host and joining-client behavior
 separately. Painter-side completion is not enough; a normal other client must
@@ -119,14 +123,15 @@ path.
 
 ### Game-update revalidation
 
-The native packed receiver route is exact-build gated. After any game update,
-do not copy old RVAs forward. Recompute and record the PE timestamp, image size,
-checksum, raw `.text` size/hash, reflected `MulticastPackedPaintBatch` payload
-layout, UFunction thunk, vtable slot, decoder, source-ID filter,
-component-to-manager resolver, enqueue/coalescer chain, manager queue offsets,
-and runtime-triangle `TArray` offset/stride. Then repeat both multiplayer
+The native packed receiver route is not exact-build gated. After a game update,
+record the PE and `.text` identity for diagnosis, then verify the reflected
+`MulticastPackedPaintBatch` payload layout and the unique masked-signature chain
+from UFunction thunk through vtable implementation, decoder, manager resolver,
+enqueue, and coalescer. Never copy old RVAs forward as acceptance criteria. A
+missing, changed-ABI, or ambiguous candidate must disable local calls and select
+server packed fallback before the first RPC. Then repeat both multiplayer
 directions with event-watch, pressure/queue samples, and painter/receiver
-texture checksums. A mismatch must remain fail-closed before the first RPC.
+texture checksums.
 
 ## Bridge File Structure
 

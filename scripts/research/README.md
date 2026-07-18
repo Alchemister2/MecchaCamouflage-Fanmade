@@ -25,7 +25,7 @@ meccha-camouflage.exe --research-replication --pid <exact-pid> \
   [--paint-mode packed-local-queue|combined|combined-no-resend|local-only|packed-only] [--stroke-limit N] \
   [--replay-stroke-index N] \
   [--front-mode paint|fill|skip] [--side-mode paint|fill|skip] [--back-mode paint|fill|skip] \
-  [--batch-limit 1..20] [--batch-pacing-ms 50..500] \
+  [--batch-limit 1..500] [--batch-pacing-ms 1..500] \
   [--cancel-after-ms N | --shutdown-after-ms N] [--fill-color '#RRGGBB'] \
   [--paint-color '#RRGGBB'] [--packed-radius-scale 0.5..4.0] \
   [--triangle-world-radius]
@@ -110,16 +110,14 @@ source-color capture/transfer for that payload and assigns one constant color
 to Paint samples while retaining normal geometry planning, pass construction,
 packed serialization, RPC pacing, and the native local receiver queue. It does
 not alter production settings. `--packed-radius-scale` changes only the packed
-brush radius for controlled footprint A/B runs; the planner spacing remains at
-the configured Brush 2 step. When omitted, production derives one scale for the
-validated mesh/job from the UV-area-weighted runtime triangle world/UV scale and
-the live mesh bounds diameter, with the measured fold/seam safety factor. Pass
-`1.0`, `2.0`, or another explicit value only for an A/B. The scale applies to
-packed mesh-anchor strokes, not preview or direct-UV-only routes.
-`--triangle-world-radius` keeps the UV radius
-unchanged but derives each packed anchor's effective world radius from that
-triangle's UV-to-world Jacobian. It is an explicit research A/B control, not a
-production setting.
+brush radius for controlled uniform-footprint A/B runs; the planner spacing
+remains at the smallest enabled Brush step. Supplying this option disables the
+production triangle-derived world radius for that run and asks the game sentinel
+to convert the scaled wire radius. When omitted, production keeps the UV wire
+radius at scale `1.0` and derives each anchor's effective world radius from that
+triangle's UV-to-world Jacobian. `--triangle-world-radius` explicitly selects
+and labels that production policy in a research run; it is mutually exclusive
+with a uniform scale override.
 
 `--front-mode`, `--side-mode`, and `--back-mode` override region modes only in
 the research runner. They minimize a reproduction (for example, isolating
@@ -127,10 +125,11 @@ Front Paint from camera-dependent unsafe Side/Back mappings) while still using
 the normal payload and native planner.
 
 `--batch-limit` and `--batch-pacing-ms` carry the same two remote-lane controls
-as the production sliders. The fastest defaults are 20 strokes per packed RPC
-and 50 ms between remote dispatches. The accepted ranges are 1--20 strokes and
-50--500 ms; zero pacing is deliberately rejected because an immediate repost
-loop can monopolize the game thread. To reproduce the former conservative
+as the production sliders. The defaults are 20 strokes per packed RPC and 50 ms
+between remote dispatches. The accepted ranges are 1--500 strokes and 1--500
+ms; zero pacing is deliberately rejected because an immediate repost loop can
+monopolize the game thread. Readable game-owned limits may resolve a requested
+value downward. To reproduce the former conservative
 comparison without a special mode, pass `--batch-limit 6 --batch-pacing-ms 75`.
 The production-shaped packed local route uses the same batch limit and pacing
 as the server lane. Painter-local receiver backlog is observed but is not used
@@ -176,21 +175,26 @@ Normal production paint keeps the explicit server packed RPC and invokes the
 validated native implementation behind `MulticastPackedPaintBatch` directly,
 without calling the reflected multicast UFunction. A synthetic non-self source
 GUID lets the receiver accept the local copy without changing component state.
-The resolver verifies the current Shipping PE/text identity, reflected payload
-layout, UFunction thunk, vtable slot, decoder, component-to-manager resolver,
-and enqueue chain. It pins the exact manager used by the component and requires
-an exact component-queue increase before accepting each paired batch. Any
-mismatch fails closed; there is no per-stroke or reflected fallback. Queue
+The resolver records the current Shipping PE/text identity and validates the
+reflected payload layout, UFunction thunk, vtable slot, decoder,
+component-to-manager resolver, and enqueue chain. PE/text identity is diagnostic
+rather than a version gate. It pins the exact manager used by the component and requires an exact
+component-queue increase before accepting each paired batch. If local route or
+queue validation fails, local calls stop and the server packed route continues
+at 20 strokes / 50 ms; there is no per-stroke or reflected fallback. Queue
 submission and checksum change are separate evidence: a returned receiver call
 does not itself prove pixel/render completion.
 
 The planner uses `Fill`, `CoarsePaint`, then `FinePaint`; each pass retains
-`Back`, `Side`, then `Front`. Fill runs once, Paint regions receive a deduplicated
-Brush 1 pass (10--30, default 30) and then the full Brush 2 pass (5--10, default
-10), and Skip emits nothing. Pass boundaries never share a packed RPC. Within
-each pass/region partition, bind/reference-pose Z supplies head-to-feet rows and
-camera-right supplies left-to-right order; runtime surface Z is only a fallback.
-Remote and local lanes consume the same final stroke vector.
+only the enabled Brushes. If any region selects Fill, one 100-texel Fill pass
+covers every mesh region, including Paint and Skip. Paint regions then receive
+an optional deduplicated Brush 1 pass (10--50, default 25 and OFF) and/or the
+full Brush 2 pass (1--10, default 5 and ON). With no Fill region, no Fill pass
+is emitted. Pass boundaries never share a packed RPC. Within each pass, all
+regions are ordered together from top to bottom and left to right using
+current-pose world positions projected into
+the current camera; profile reference-pose positions are not used. Remote and
+local lanes consume the same final stroke vector.
 
 For repeatable process/game-thread CPU sampling around a runner invocation, use
 `sample-process-thread-cpu.ps1`. It records raw 100-ms cumulative samples and

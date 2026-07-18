@@ -2,7 +2,7 @@ param(
     [string]$Version = "",
     [string]$OutDir = "",
     [string]$ExePath = "",
-    [string]$RuntimeRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+    [string]$RuntimeRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).ProviderPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,12 +28,27 @@ function Resolve-ProjectVersion {
     return "unversioned"
 }
 
+$RuntimeRoot = [System.IO.Path]::GetFullPath(
+    (Resolve-Path -LiteralPath $RuntimeRoot).ProviderPath
+)
 $Version = Resolve-ProjectVersion -Requested $Version -Root $RuntimeRoot
 Write-Host "Package version: $Version"
 
-if (-not $OutDir) { $OutDir = Join-Path $RuntimeRoot ".build\package" }
+if (-not $OutDir) {
+    $OutDir = Join-Path $RuntimeRoot ".build\package"
+}
+elseif (-not [System.IO.Path]::IsPathRooted($OutDir)) {
+    $OutDir = Join-Path $RuntimeRoot $OutDir
+}
+$OutDir = [System.IO.Path]::GetFullPath($OutDir)
 $ArtifactName = "meccha-camouflage-$Version"
-if (-not $ExePath) { $ExePath = Join-Path $RuntimeRoot ".build\bin\meccha-camouflage.exe" }
+if (-not $ExePath) {
+    $ExePath = Join-Path $RuntimeRoot ".build\bin\meccha-camouflage.exe"
+}
+elseif (-not [System.IO.Path]::IsPathRooted($ExePath)) {
+    $ExePath = Join-Path $RuntimeRoot $ExePath
+}
+$ExePath = [System.IO.Path]::GetFullPath($ExePath)
 if (-not (Test-Path $ExePath -PathType Leaf)) { throw "Executable not found: $ExePath. Run scripts/build.ps1 first." }
 
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null

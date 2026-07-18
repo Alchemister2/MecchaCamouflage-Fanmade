@@ -15,16 +15,17 @@ namespace runtime_contract
     // ElementSize@0x34, PropertyFlags@0x38.
     constexpr std::size_t FPropertyElementSizeOffset = 0x34;
     constexpr int InternalNoResendMaxCallsPerTick = 6;
-    constexpr int MaximumNetworkBatchLimit = 20;
+    constexpr int MaximumNetworkBatchLimit = 500;
     constexpr int FastLocalCadenceMs = 17;
     constexpr int FallbackOutgoingStrokesPerBatch = 20;
     constexpr int FallbackOutgoingBatchesPerSecond = 20;
     constexpr int FallbackReplicatedStrokesPerTick = 24;
     constexpr int FallbackRenderTargetWritesPerFrame = 6;
-    constexpr int MinimumNetworkPacingMs = 50;
+    constexpr int MinimumNetworkPacingMs = 1;
     constexpr int MaximumManualNetworkPacingMs = 500;
+    constexpr int ServerPackedFallbackBatchLimit = 20;
+    constexpr int ServerPackedFallbackPacingMs = 50;
     constexpr std::uint64_t LocalDispatchCpuBudgetUs = 4'000;
-    constexpr int SupportedBrushPipelineVersion = 2;
 
     // Packed skeletal strokes carry both a UV-space brush radius and an optional
     // world-space radius.  In the supported Shipping build, compact-stroke
@@ -34,17 +35,15 @@ namespace runtime_contract
     // normalized UV radius here is not equivalent: it suppresses that conversion
     // and collapses otherwise large brushes to tiny world-space dots.
     constexpr float PackedMeshAnchorWorldRadiusAuto = 0.0f;
-    // The supported paint mesh's cached world geometry and TargetMesh bounds
-    // use different linear scales.  The native packed preflight multiplies the
-    // normalized brush radius by TargetMesh bounds diameter, which produced a
-    // 6--7 px footprint for a requested 10 texel radius.  Host RGBA A/B against
-    // the direct-UV route found 3.4 to be the closest conservative calibration;
-    // 4.0 and per-triangle maxima leaked onto non-Back atlas areas.
-    // World-sphere painting begins to cross nearby folded surfaces before it
-    // exactly matches a direct-UV circle.  Host mask A/B selected this
-    // conservative factor (3.4/4.0 outperformed both 4.0 and per-anchor max).
+    // Production preserves the configured UV radius on the wire. Each anchor's
+    // effective world radius is derived independently from that triangle's
+    // UV-to-world Jacobian; a uniform wire multiplier either leaves holes or
+    // expands one world-space stroke across adjacent mesh surfaces.
+    constexpr double PackedMeshAnchorProductionRadiusScale = 1.0;
+    constexpr bool PackedMeshAnchorProductionUsesTriangleWorldRadius = true;
+    // Research-only dynamic calibration retains the conservative fold/seam
+    // factor for controlled comparisons.
     constexpr double PackedMeshAnchorCoverageSafetyFactor = 0.91;
-    constexpr double PackedMeshAnchorExpectedRadiusCalibration = 3.5;
     constexpr int PackedMeshAnchorSubdivisionLevelAuto = 0;
     constexpr float PackedMeshAnchorSubdivisionPixelSizeAuto = 0.0f;
     constexpr int PackedMeshAnchorTemplateResolutionAuto = 0;
@@ -68,6 +67,26 @@ namespace runtime_contract
                std::isfinite(brush_uv_radius) &&
                brush_uv_radius > 0.0f &&
                effective_world_radius > brush_uv_radius;
+    }
+
+    inline bool resolve_packed_triangle_world_radius(double world_units_per_uv,
+                                                     float brush_uv_radius,
+                                                     float& world_radius)
+    {
+        world_radius = 0.0f;
+        if (!std::isfinite(world_units_per_uv) || world_units_per_uv <= 0.0 ||
+            !std::isfinite(brush_uv_radius) || brush_uv_radius <= 0.0f ||
+            brush_uv_radius > 1.0f)
+        {
+            return false;
+        }
+        const double resolved = world_units_per_uv * static_cast<double>(brush_uv_radius);
+        if (!std::isfinite(resolved) || resolved <= static_cast<double>(brush_uv_radius))
+        {
+            return false;
+        }
+        world_radius = static_cast<float>(resolved);
+        return std::isfinite(world_radius) && world_radius > brush_uv_radius;
     }
 
     // BrushSettings.Radius is kept in planner/direct-UV units.  Only the packed
@@ -136,26 +155,6 @@ namespace runtime_contract
     constexpr bool uobject_flags_usable(std::uint32_t object_flags, std::uint32_t class_flags)
     {
         return (object_flags & ObjectRejectMask) == 0 && (class_flags & ClassRejectMask) == 0;
-    }
-
-    struct BrushPipelineVersionDecision
-    {
-        double requested_version;
-        int supported_version;
-        bool required;
-        bool supported;
-    };
-
-    constexpr BrushPipelineVersionDecision resolve_brush_pipeline_version(
-        double requested_version,
-        bool preview_only,
-        bool unpreview_only)
-    {
-        const bool required = !preview_only && !unpreview_only;
-        return {requested_version,
-                SupportedBrushPipelineVersion,
-                required,
-                !required || requested_version == static_cast<double>(SupportedBrushPipelineVersion)};
     }
 
     constexpr bool packed_manager_precommit_matches(std::uintptr_t captured_manager,
@@ -420,9 +419,9 @@ namespace runtime_contract
         int uv_island;
         double u;
         double v;
-        bool has_reference_position;
-        double reference_z;
-        double fallback_z;
+        bool has_current_view_position;
+        double current_view_vertical;
+        double fallback_view_vertical;
         double horizontal;
         std::size_t original_ordinal;
     };
@@ -447,36 +446,45 @@ namespace runtime_contract
         std::size_t fill_deduplicated{0};
         std::size_t coarse_paint_candidates{0};
         std::size_t coarse_paint_deduplicated{0};
-        bool reference_position_fallback_used{false};
-        std::size_t reference_position_fallback_candidates{0};
+        bool current_view_projection_fallback_used{false};
+        std::size_t current_view_projection_fallback_candidates{0};
     };
 
     inline TwoBrushReplayPlan build_two_brush_replay_plan(
         const std::vector<TwoBrushReplayCandidate>& candidates,
         int texture_size,
+        bool brush_1_enabled,
         double brush_1_size_texels,
+        bool brush_2_enabled,
         double brush_2_size_texels,
         double fill_radius_texels)
     {
         TwoBrushReplayPlan plan{};
-        constexpr ReplayRegion region_order[]{ReplayRegion::Back,
-                                               ReplayRegion::Side,
-                                               ReplayRegion::Front};
         const double texture_size_double = static_cast<double>(max_value(1, texture_size));
-        const double fill_cell_uv = std::max(fill_radius_texels * 0.75, brush_2_size_texels) /
-                                    texture_size_double;
+        const double fill_cell_uv = fill_radius_texels * 0.75 / texture_size_double;
         const double coarse_cell_uv = brush_1_size_texels / texture_size_double;
+        bool fill_all_regions = false;
+        for (const auto& candidate : candidates)
+        {
+            if (candidate.mode == ReplayRegionMode::Fill)
+            {
+                fill_all_regions = true;
+                break;
+            }
+        }
         double vertical_top = 0.0;
         double vertical_bottom = 0.0;
         bool have_vertical_bounds = false;
         const auto selected_vertical = [](const TwoBrushReplayCandidate& candidate) {
-            return candidate.has_reference_position && std::isfinite(candidate.reference_z)
-                       ? candidate.reference_z
-                       : (std::isfinite(candidate.fallback_z) ? candidate.fallback_z : 0.0);
+            return candidate.has_current_view_position && std::isfinite(candidate.current_view_vertical)
+                       ? candidate.current_view_vertical
+                       : (std::isfinite(candidate.fallback_view_vertical)
+                              ? candidate.fallback_view_vertical
+                              : 0.0);
         };
         for (const auto& candidate : candidates)
         {
-            if (candidate.mode == ReplayRegionMode::Skip)
+            if (!fill_all_regions && candidate.mode == ReplayRegionMode::Skip)
             {
                 continue;
             }
@@ -492,93 +500,102 @@ namespace runtime_contract
                 vertical_top = std::max(vertical_top, vertical);
                 vertical_bottom = std::min(vertical_bottom, vertical);
             }
-            if (!candidate.has_reference_position || !std::isfinite(candidate.reference_z))
+            if (!candidate.has_current_view_position || !std::isfinite(candidate.current_view_vertical))
             {
-                ++plan.reference_position_fallback_candidates;
+                ++plan.current_view_projection_fallback_candidates;
             }
         }
-        plan.reference_position_fallback_used = plan.reference_position_fallback_candidates > 0;
+        plan.current_view_projection_fallback_used =
+            plan.current_view_projection_fallback_candidates > 0;
         const double vertical_span = std::max(0.001, vertical_top - vertical_bottom);
         auto append_pass = [&](ReplayPass pass,
                                ReplayRegionMode required_mode,
                                double dedupe_cell_uv,
-                               double row_size_texels) {
+                               double row_size_texels,
+                               bool include_all_regions = false) {
             std::set<std::tuple<int, int, int, int>> emitted_cells{};
+            std::vector<TwoBrushReplayEntry> pending{};
             const double row_height = std::max(
                 0.000001,
                 vertical_span * std::max(0.001, row_size_texels) / texture_size_double);
-            for (const auto region : region_order)
+            for (const auto& candidate : candidates)
             {
-                std::vector<TwoBrushReplayEntry> pending{};
-                for (const auto& candidate : candidates)
+                if (!include_all_regions && candidate.mode != required_mode)
                 {
-                    if (candidate.region != region || candidate.mode != required_mode)
+                    continue;
+                }
+                if (pass == ReplayPass::Fill)
+                {
+                    ++plan.fill_candidates;
+                }
+                else if (pass == ReplayPass::CoarsePaint)
+                {
+                    ++plan.coarse_paint_candidates;
+                }
+                if (dedupe_cell_uv > 0.000001)
+                {
+                    const auto cell_coordinate = [&](double value) {
+                        const double finite_value = std::isfinite(value) ? value : 0.0;
+                        return static_cast<int>(std::floor(
+                            std::max(0.0, std::min(1.0, finite_value)) / dedupe_cell_uv));
+                    };
+                    const auto cell = std::make_tuple(
+                        static_cast<int>(candidate.region),
+                        candidate.uv_island,
+                        cell_coordinate(candidate.u),
+                        cell_coordinate(candidate.v));
+                    if (!emitted_cells.insert(cell).second)
                     {
+                        if (pass == ReplayPass::Fill)
+                        {
+                            ++plan.fill_deduplicated;
+                        }
+                        else if (pass == ReplayPass::CoarsePaint)
+                        {
+                            ++plan.coarse_paint_deduplicated;
+                        }
                         continue;
                     }
-                    if (pass == ReplayPass::Fill)
-                    {
-                        ++plan.fill_candidates;
-                    }
-                    else if (pass == ReplayPass::CoarsePaint)
-                    {
-                        ++plan.coarse_paint_candidates;
-                    }
-                    if (dedupe_cell_uv > 0.000001)
-                    {
-                        const auto cell_coordinate = [&](double value) {
-                            const double finite_value = std::isfinite(value) ? value : 0.0;
-                            return static_cast<int>(std::floor(
-                                std::max(0.0, std::min(1.0, finite_value)) / dedupe_cell_uv));
-                        };
-                        const auto cell = std::make_tuple(
-                            static_cast<int>(candidate.region),
-                            candidate.uv_island,
-                            cell_coordinate(candidate.u),
-                            cell_coordinate(candidate.v));
-                        if (!emitted_cells.insert(cell).second)
-                        {
-                            if (pass == ReplayPass::Fill)
-                            {
-                                ++plan.fill_deduplicated;
-                            }
-                            else if (pass == ReplayPass::CoarsePaint)
-                            {
-                                ++plan.coarse_paint_deduplicated;
-                            }
-                            continue;
-                        }
-                    }
-                    pending.push_back(
-                        {candidate.sample_index,
-                         pass,
-                         candidate.region,
-                         {spatial_scanline_row(vertical_top,
-                                               selected_vertical(candidate),
-                                               row_height),
-                          candidate.horizontal,
-                          candidate.original_ordinal}});
                 }
-                std::stable_sort(pending.begin(), pending.end(), [](const auto& left, const auto& right) {
-                    return spatial_scanline_less(left.spatial_key, right.spatial_key);
-                });
-                plan.entries.insert(plan.entries.end(), pending.begin(), pending.end());
+                pending.push_back(
+                    {candidate.sample_index,
+                     pass,
+                     candidate.region,
+                     {spatial_scanline_row(vertical_top,
+                                           selected_vertical(candidate),
+                                           row_height),
+                      candidate.horizontal,
+                      candidate.original_ordinal}});
             }
+            std::stable_sort(pending.begin(), pending.end(), [](const auto& left, const auto& right) {
+                return spatial_scanline_less(left.spatial_key, right.spatial_key);
+            });
+            plan.entries.insert(plan.entries.end(), pending.begin(), pending.end());
         };
 
-        append_pass(ReplayPass::Fill, ReplayRegionMode::Fill, fill_cell_uv, fill_radius_texels);
+        append_pass(ReplayPass::Fill,
+                    ReplayRegionMode::Fill,
+                    fill_cell_uv,
+                    fill_radius_texels,
+                    fill_all_regions);
         plan.fill_end = plan.entries.size();
         plan.fill_count = plan.fill_end;
-        append_pass(ReplayPass::CoarsePaint,
-                    ReplayRegionMode::Paint,
-                    coarse_cell_uv,
-                    brush_1_size_texels);
+        if (brush_1_enabled)
+        {
+            append_pass(ReplayPass::CoarsePaint,
+                        ReplayRegionMode::Paint,
+                        coarse_cell_uv,
+                        brush_1_size_texels);
+        }
         plan.coarse_end = plan.entries.size();
         plan.coarse_paint_count = plan.coarse_end - plan.fill_end;
-        append_pass(ReplayPass::FinePaint,
-                    ReplayRegionMode::Paint,
-                    0.0,
-                    brush_2_size_texels);
+        if (brush_2_enabled)
+        {
+            append_pass(ReplayPass::FinePaint,
+                        ReplayRegionMode::Paint,
+                        0.0,
+                        brush_2_size_texels);
+        }
         plan.fine_paint_count = plan.entries.size() - plan.coarse_end;
         return plan;
     }

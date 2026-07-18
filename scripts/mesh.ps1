@@ -19,7 +19,9 @@ $ErrorActionPreference = "Stop"
 
 function Resolve-RepoRoot {
     $scriptDir = Split-Path -Parent $PSCommandPath
-    return (Resolve-Path (Join-Path $scriptDir "..")).Path
+    return [System.IO.Path]::GetFullPath(
+        (Resolve-Path -LiteralPath (Join-Path $scriptDir "..")).ProviderPath
+    )
 }
 
 function Default-PaksPath {
@@ -33,7 +35,7 @@ function Require-Path([string]$Path, [string]$Description) {
     if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) {
         throw "$Description not found: $Path"
     }
-    return (Resolve-Path -LiteralPath $Path).Path
+    return (Resolve-Path -LiteralPath $Path).ProviderPath
 }
 
 $RepoRoot = Resolve-RepoRoot

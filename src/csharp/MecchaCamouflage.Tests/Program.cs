@@ -9,15 +9,16 @@ using MecchaCamouflage.Core;
 var tests = new List<(string Name, Action Run)>
 {
     ("paint defaults expose coarse and detail brushes", PaintDefaultsExposeCoarseAndDetailBrushes),
-    ("legacy default brush migrates to two-pass defaults", LegacyDefaultBrushMigratesToTwoPassDefaults),
-    ("legacy brush migration handles missing layout version", LegacyBrushMigrationHandlesMissingLayoutVersion),
-    ("legacy explicit brush migrates to detail brush", LegacyExplicitBrushMigratesToDetailBrush),
-    ("existing explicit Brush 1 value is preserved", ExistingExplicitBrush1ValueIsPreserved),
-    ("two-pass brush settings clamp to supported ranges", TwoPassBrushSettingsClampToSupportedRanges),
-    ("paint defaults expose fastest batch sliders", PaintDefaultsExposeFastestBatchSliders),
+    ("brush selection persists", BrushSelectionPersists),
+    ("brush settings clamp to supported ranges", TwoPassBrushSettingsClampToSupportedRanges),
+    ("paint defaults expose batch sliders", PaintDefaultsExposeBatchSliders),
     ("app defaults use 99 percent opacity", AppDefaultsUse99PercentOpacity),
-    ("payload sends the two-pass brush pipeline", PayloadSendsTwoPassBrushPipeline),
+    ("payload sends active brushes", PayloadSendsTwoPassBrushPipeline),
     ("native accepts the Brush 1 configured range", NativeAcceptsBrush1ConfiguredRange),
+    ("native local route is signature resolved instead of build gated", NativeLocalRouteIsSignatureResolvedInsteadOfBuildGated),
+    ("native local failures use fixed server packed fallback", NativeLocalFailuresUseFixedServerPackedFallback),
+    ("native production radius follows each triangle and fill stays fixed", NativeProductionRadiusFollowsEachTriangleAndFillStaysFixed),
+    ("native spatial replay follows the current pose and camera", NativeSpatialReplayFollowsCurrentPoseAndCamera),
     ("payload includes packed route and fill material", PayloadIncludesPackedRouteAndFillMaterial),
     ("payload sends batch slider values", PayloadSendsBatchSliderValues),
     ("pre-mode pacing preserves saved delay", PreModePacingPreservesSavedDelay),
@@ -47,6 +48,7 @@ var tests = new List<(string Name, Action Run)>
     ("auto material defaults off", AutoMaterialDefaultsOff),
     ("front region defaults to fill", FrontRegionDefaultsToFill),
     ("bridge messages are user friendly", BridgeMessagesAreUserFriendly),
+    ("paint fallback warning preserves native reason and fixed pacing", PaintFallbackWarningPreservesNativeReasonAndFixedPacing),
     ("settings detect supported system language", SettingsDetectSupportedSystemLanguage),
     ("ui snapshot exposes two-pass brushes and batch sliders", UiSnapshotExposesTwoPassBrushesAndBatchSliders),
     ("web ui exposes two-pass brush sliders", WebUiExposesTwoPassBrushSliders),
@@ -58,6 +60,7 @@ var tests = new List<(string Name, Action Run)>
     ("hotkey validation rejects duplicates", HotkeyValidationRejectsDuplicates),
     ("host session reset restores setting default", HostSessionResetRestoresDefault),
     ("host session brush updates are independent and detail syncs coverage", HostSessionBrushUpdatesAreIndependentAndDetailSyncsCoverage),
+    ("host session rejects disabling every brush", HostSessionRejectsDisablingEveryBrush),
     ("host session updates batch sliders", HostSessionUpdatesBatchSliders),
     ("host session quantizes decimal batch slider updates", HostSessionQuantizesDecimalBatchSliderUpdates),
     ("host session rolls back invalid hotkey update", HostSessionRollsBackInvalidHotkeyUpdate),
@@ -115,90 +118,33 @@ static void PaintDefaultsExposeCoarseAndDetailBrushes()
 {
     var paint = new AppSettings().Paint;
 
-    Assert(Math.Abs(paint.Brush1SizeTexels - 30.0) < 0.000001, "brush 1 should default to the largest coarse size");
-    Assert(Math.Abs(paint.Brush2SizeTexels - 10.0) < 0.000001, "brush 2 should default to the largest detail size");
+    Assert(!paint.Brush1Enabled, "brush 1 should default off");
+    Assert(paint.Brush2Enabled, "brush 2 should default on");
+    Assert(Math.Abs(paint.Brush1SizeTexels - 25.0) < 0.000001, "brush 1 should default to 25 texels");
+    Assert(Math.Abs(paint.Brush2SizeTexels - 5.0) < 0.000001, "brush 2 should default to 5 texels");
     Assert(Math.Abs(paint.CoverageStepTexels - paint.Brush2SizeTexels) < 0.000001, "coverage compatibility should follow brush 2");
 }
 
-static void LegacyDefaultBrushMigratesToTwoPassDefaults()
+static void BrushSelectionPersists()
 {
     using var temp = new TempHome();
-    var paths = new AppPaths("two-pass-default-brush-migration-test");
-    Directory.CreateDirectory(paths.ConfigDirectory);
-    File.WriteAllText(paths.ConfigPath, """
-    {
-      "layout_version": 36,
-      "stroke_size_texels": 5.0
-    }
-    """);
-
-    var settings = new SettingsStore(paths).Load();
-
-    Assert(Math.Abs(settings.Paint.Brush1SizeTexels - 30.0) < 0.000001, "legacy settings without brush 1 should gain the coarse brush default");
-    Assert(Math.Abs(settings.Paint.Brush2SizeTexels - 10.0) < 0.000001, "the historical default 5 should migrate to the new detail default 10");
-    Assert(Math.Abs(settings.Paint.CoverageStepTexels - 10.0) < 0.000001, "coverage compatibility should migrate with brush 2");
+    var paths = new AppPaths("brush-selection-persistence-test");
+    var settings = new AppSettings();
+    settings.Paint.Brush1Enabled = true;
+    settings.Paint.Brush1SizeTexels = 42.5;
+    settings.Paint.Brush2Enabled = false;
+    settings.Paint.Brush2SizeTexels = 2.5;
 
     new SettingsStore(paths).Save(settings);
+    var loaded = new SettingsStore(paths).Load();
+    Assert(loaded.Paint.Brush1Enabled && !loaded.Paint.Brush2Enabled, "enabled brushes should round-trip");
+    Assert(Math.Abs(loaded.Paint.Brush1SizeTexels - 42.5) < 0.000001, "brush 1 size should round-trip");
+    Assert(Math.Abs(loaded.Paint.Brush2SizeTexels - 2.5) < 0.000001, "brush 2 size should round-trip");
+    Assert(Math.Abs(loaded.Paint.CoverageStepTexels - 42.5) < 0.000001, "coverage should follow the only active brush");
     using var saved = JsonDocument.Parse(File.ReadAllText(paths.ConfigPath));
-    Assert(Math.Abs(saved.RootElement.GetProperty("brush_1_size_texels").GetDouble() - 30.0) < 0.000001, "brush 1 should persist with its new default");
-    Assert(Math.Abs(saved.RootElement.GetProperty("brush_2_size_texels").GetDouble() - 10.0) < 0.000001, "brush 2 should persist with its new key");
+    Assert(saved.RootElement.GetProperty("brush_1_enabled").GetBoolean(), "brush 1 enabled should persist");
+    Assert(!saved.RootElement.GetProperty("brush_2_enabled").GetBoolean(), "brush 2 enabled should persist");
     Assert(!saved.RootElement.TryGetProperty("stroke_size_texels", out _), "the legacy brush key should not be persisted");
-}
-
-static void LegacyBrushMigrationHandlesMissingLayoutVersion()
-{
-    using var temp = new TempHome();
-    var paths = new AppPaths("two-pass-missing-layout-migration-test");
-    Directory.CreateDirectory(paths.ConfigDirectory);
-    File.WriteAllText(paths.ConfigPath, """
-    {
-      "stroke_size_texels": 5.0
-    }
-    """);
-
-    var settings = new SettingsStore(paths).Load();
-
-    Assert(Math.Abs(settings.Paint.Brush2SizeTexels - 10.0) < 0.000001, "a config without a layout version should be treated as legacy");
-}
-
-static void LegacyExplicitBrushMigratesToDetailBrush()
-{
-    using var temp = new TempHome();
-    var paths = new AppPaths("two-pass-explicit-brush-migration-test");
-    Directory.CreateDirectory(paths.ConfigDirectory);
-    File.WriteAllText(paths.ConfigPath, """
-    {
-      "layout_version": 36,
-      "stroke_size_texels": 7.5
-    }
-    """);
-
-    var settings = new SettingsStore(paths).Load();
-
-    Assert(Math.Abs(settings.Paint.Brush1SizeTexels - 30.0) < 0.000001, "legacy explicit settings should gain the coarse brush default");
-    Assert(Math.Abs(settings.Paint.Brush2SizeTexels - 7.5) < 0.000001, "a legacy explicit value should migrate to brush 2");
-    Assert(Math.Abs(settings.Paint.CoverageStepTexels - 7.5) < 0.000001, "coverage compatibility should follow the migrated brush 2");
-}
-
-static void ExistingExplicitBrush1ValueIsPreserved()
-{
-    using var temp = new TempHome();
-    var paths = new AppPaths("brush-1-explicit-value-preservation-test");
-    Directory.CreateDirectory(paths.ConfigDirectory);
-    File.WriteAllText(paths.ConfigPath, """
-    {
-      "layout_version": 37,
-      "brush_1_size_texels": 20.0,
-      "brush_2_size_texels": 7.5
-    }
-    """);
-
-    var settings = new SettingsStore(paths).Load();
-
-    Assert(Math.Abs(settings.Paint.Brush1SizeTexels - 20.0) < 0.000001,
-        "an explicit legacy Brush 1 selection must not be silently changed to the new default");
-    Assert(Math.Abs(settings.Paint.Brush2SizeTexels - 7.5) < 0.000001,
-        "preserving Brush 1 must not disturb Brush 2");
 }
 
 static void TwoPassBrushSettingsClampToSupportedRanges()
@@ -211,22 +157,28 @@ static void TwoPassBrushSettingsClampToSupportedRanges()
     var clamped = SettingsStore.Clamp(settings);
 
     Assert(Math.Abs(clamped.Paint.Brush1SizeTexels - 10.0) < 0.000001, "brush 1 should clamp to 10 at the lower bound");
-    Assert(Math.Abs(clamped.Paint.Brush2SizeTexels - 5.0) < 0.000001, "brush 2 should clamp to 5 at the lower bound");
-    Assert(Math.Abs(clamped.Paint.CoverageStepTexels - 5.0) < 0.000001, "coverage compatibility should follow the clamped brush 2");
+    Assert(Math.Abs(clamped.Paint.Brush2SizeTexels - 3.0) < 0.000001, "brush 2 should accept values above the new lower bound");
+    Assert(Math.Abs(clamped.Paint.CoverageStepTexels - 3.0) < 0.000001, "coverage should follow the active brush 2");
 
     settings.Paint.Brush1SizeTexels = 35.0;
     settings.Paint.Brush2SizeTexels = 15.0;
     clamped = SettingsStore.Clamp(settings);
 
-    Assert(Math.Abs(clamped.Paint.Brush1SizeTexels - 30.0) < 0.000001, "brush 1 should clamp to 30 at the upper bound");
+    Assert(Math.Abs(clamped.Paint.Brush1SizeTexels - 35.0) < 0.000001, "brush 1 should accept values below 50");
     Assert(Math.Abs(clamped.Paint.Brush2SizeTexels - 10.0) < 0.000001, "brush 2 should clamp to 10 at the upper bound");
+
+    settings.Paint.Brush2SizeTexels = 0.5;
+    settings.Paint.Brush1SizeTexels = 55.0;
+    clamped = SettingsStore.Clamp(settings);
+    Assert(Math.Abs(clamped.Paint.Brush1SizeTexels - 50.0) < 0.000001, "brush 1 should clamp to 50");
+    Assert(Math.Abs(clamped.Paint.Brush2SizeTexels - 1.0) < 0.000001, "brush 2 should clamp to 1");
 }
 
-static void PaintDefaultsExposeFastestBatchSliders()
+static void PaintDefaultsExposeBatchSliders()
 {
     var paint = new AppSettings().Paint;
 
-    Assert(paint.PackedBatchLimit == 20, "batch limit should default to the observed maximum");
+    Assert(paint.PackedBatchLimit == 20, "batch limit should retain its default");
     Assert(paint.PackedBatchPacingMs == 50, "batch pacing should default to the fastest safe interval");
 }
 
@@ -245,16 +197,20 @@ static void PayloadSendsTwoPassBrushPipeline()
     var settings = new AppSettings();
     settings.Paint.Brush1SizeTexels = 17.5;
     settings.Paint.Brush2SizeTexels = 7.5;
+    settings.Paint.Brush1Enabled = true;
+    settings.Paint.Brush2Enabled = false;
 
     var payload = BridgePayloadBuilder.BuildPaintPayload(settings, 42, "Game.exe", new PaintRequestOptions());
     using var doc = JsonDocument.Parse(payload);
     var tuning = doc.RootElement.GetProperty("tuning");
 
+    Assert(tuning.GetProperty("brush_1_enabled").GetBoolean(), "payload should enable brush 1");
     Assert(Math.Abs(tuning.GetProperty("brush_1_size_texels").GetDouble() - 17.5) < 0.000001, "payload should send brush 1");
+    Assert(!tuning.GetProperty("brush_2_enabled").GetBoolean(), "payload should disable brush 2");
     Assert(Math.Abs(tuning.GetProperty("brush_2_size_texels").GetDouble() - 7.5) < 0.000001, "payload should send brush 2");
-    Assert(tuning.GetProperty("brush_pipeline_version").GetInt32() == 2, "payload should select the two-pass planner");
-    Assert(Math.Abs(tuning.GetProperty("stroke_size_texels").GetDouble() - 7.5) < 0.000001, "legacy stroke size should mirror brush 2");
-    Assert(Math.Abs(tuning.GetProperty("coverage_step_texels").GetDouble() - 7.5) < 0.000001, "coverage compatibility should mirror brush 2");
+    Assert(!tuning.TryGetProperty("brush_pipeline_version", out _), "payload should not version the brush pipeline");
+    Assert(!tuning.TryGetProperty("stroke_size_texels", out _), "payload should not send the legacy stroke size");
+    Assert(Math.Abs(tuning.GetProperty("coverage_step_texels").GetDouble() - 17.5) < 0.000001, "coverage should follow the only active brush");
 }
 
 static void NativeAcceptsBrush1ConfiguredRange()
@@ -263,9 +219,94 @@ static void NativeAcceptsBrush1ConfiguredRange()
         FindRepositoryRoot(),
         "src", "native", "bridge", "bridge.cpp"));
 
-    Assert(bridge.Contains("json_number_field(request, \"brush_1_size_texels\", 30.0)", StringComparison.Ordinal) &&
-           bridge.Contains("10.0, 30.0", StringComparison.Ordinal),
-        "native paint payload parsing must preserve the configured 10-30 Brush 1 range");
+    Assert(bridge.Contains("json_number_field(request, \"brush_1_size_texels\", 25.0)", StringComparison.Ordinal) &&
+           bridge.Contains("10.0, 50.0", StringComparison.Ordinal),
+        "native paint payload parsing must preserve the configured 10-50 Brush 1 range");
+}
+
+static void NativeLocalRouteIsSignatureResolvedInsteadOfBuildGated()
+{
+    var bridge = File.ReadAllText(Path.Combine(
+        FindRepositoryRoot(),
+        "src", "native", "bridge", "bridge.cpp"));
+    var start = bridge.LastIndexOf("auto resolve_local_packed_queue_route(", StringComparison.Ordinal);
+    var end = bridge.IndexOf("auto resolve_internal_no_resend_route(", start, StringComparison.Ordinal);
+    Assert(start >= 0 && end > start, "local packed route resolver should be present");
+    var resolver = bridge[start..end];
+
+    Assert(!resolver.Contains("TimeDateStamp ==", StringComparison.Ordinal) &&
+           !resolver.Contains("ExpectedThunkRva", StringComparison.Ordinal) &&
+           !resolver.Contains("main_module_build_identity_mismatch", StringComparison.Ordinal),
+        "local route must not reject a build solely because its identity or RVAs changed");
+    Assert(resolver.Contains("MulticastPackedPaintBatch_param_layout_mismatch", StringComparison.Ordinal) &&
+           resolver.Contains("slot <= 0x800", StringComparison.Ordinal) &&
+           resolver.Contains("candidates.size() != 1", StringComparison.Ordinal),
+        "local route must retain schema validation and require one signature/call-chain candidate");
+}
+
+static void NativeLocalFailuresUseFixedServerPackedFallback()
+{
+    var bridge = File.ReadAllText(Path.Combine(
+        FindRepositoryRoot(),
+        "src", "native", "bridge", "bridge.cpp"));
+    var contract = File.ReadAllText(Path.Combine(
+        FindRepositoryRoot(),
+        "src", "native", "include", "runtime_contract.hpp"));
+    var responseJson = File.ReadAllText(Path.Combine(
+        FindRepositoryRoot(),
+        "src", "native", "bridge", "bridge_json.inc"));
+
+    Assert(contract.Contains("ServerPackedFallbackBatchLimit = 20", StringComparison.Ordinal) &&
+           contract.Contains("ServerPackedFallbackPacingMs = 50", StringComparison.Ordinal),
+        "fallback pacing should be one explicit native contract");
+    Assert(bridge.Contains("\\\"local_route_mode\\\":\\\"server_packed_fallback\\\"", StringComparison.Ordinal) &&
+           bridge.Contains("\\\"fallback_reason\\\"", StringComparison.Ordinal) &&
+           bridge.Contains("\\\"fallback_batch_limit\\\"", StringComparison.Ordinal) &&
+           bridge.Contains("\\\"fallback_pacing_ms\\\"", StringComparison.Ordinal),
+        "fallback replies should expose the unified metadata contract");
+    Assert(responseJson.Contains("\"local_route_mode\"", StringComparison.Ordinal) &&
+           responseJson.Contains("\"fallback_reason\"", StringComparison.Ordinal) &&
+           responseJson.Contains("\"fallback_batch_limit\"", StringComparison.Ordinal) &&
+           responseJson.Contains("\"fallback_pacing_ms\"", StringComparison.Ordinal),
+        "production response compaction must retain fallback metadata for the controller warning");
+    Assert(bridge.Contains("the exact local receiver queue could not be measured before any server batch was submitted", StringComparison.Ordinal) &&
+           bridge.Contains("The exact local receiver queue could not be measured before the next server batch; no new batch was submitted.", StringComparison.Ordinal),
+        "initial and mid-job exact queue probe failures should activate fallback with their original text");
+    Assert(bridge.Contains("mesh_local_packed_queue_still_draining", StringComparison.Ordinal) &&
+           bridge.Contains("component_queue_not_empty", StringComparison.Ordinal),
+        "a readable nonzero previous queue must remain a blocking condition");
+}
+
+static void NativeProductionRadiusFollowsEachTriangleAndFillStaysFixed()
+{
+    var bridge = File.ReadAllText(Path.Combine(
+        FindRepositoryRoot(),
+        "src", "native", "bridge", "bridge.cpp"));
+
+    Assert(bridge.Contains("const double fill_stroke_radius_texels = 100.0;", StringComparison.Ordinal) &&
+           bridge.Contains("\\\"fill_stroke_radius_source\\\":\\\"fixed_100_texels\\\"", StringComparison.Ordinal),
+        "fill radius should be independent from either brush");
+    Assert(bridge.Contains("production_triangle_world_radius_per_stroke", StringComparison.Ordinal) &&
+           bridge.Contains("runtime_contract::resolve_packed_triangle_world_radius", StringComparison.Ordinal) &&
+           bridge.Contains("replay_triangle_world_radius_normalization", StringComparison.Ordinal) &&
+           bridge.Contains("per_stroke", StringComparison.Ordinal) &&
+           !bridge.Contains("packed_radius_calibration_failed", StringComparison.Ordinal) &&
+           !bridge.Contains("packed_radius_calibration_target_mesh_mismatch", StringComparison.Ordinal),
+        "production paint should derive one world radius per triangle without a calibration failure gate");
+}
+
+static void NativeSpatialReplayFollowsCurrentPoseAndCamera()
+{
+    var bridge = File.ReadAllText(Path.Combine(
+        FindRepositoryRoot(),
+        "src", "native", "bridge", "bridge.cpp"));
+
+    Assert(bridge.Contains("sdk_project_world_to_screen(ref, ctx, sample.world_position", StringComparison.Ordinal) &&
+           bridge.Contains("current_pose_camera_projection", StringComparison.Ordinal),
+        "replay order should be derived from each current-pose world sample in the current camera");
+    Assert(!bridge.Contains("profile_reference_z_desc_rows_camera_right_asc", StringComparison.Ordinal) &&
+           !bridge.Contains("sample.reference_position.Z", StringComparison.Ordinal),
+        "replay order must not use the mesh profile reference pose");
 }
 
 static void PayloadIncludesPackedRouteAndFillMaterial()
@@ -624,6 +665,35 @@ static void BridgeMessagesAreUserFriendly()
     Assert(!alreadyRunning.Contains("mesh", StringComparison.OrdinalIgnoreCase), "internal mesh wording should be hidden");
 }
 
+static void PaintFallbackWarningPreservesNativeReasonAndFixedPacing()
+{
+    const string reason =
+        "the exact local receiver queue could not be measured before any server batch was submitted";
+    var reply = new BridgeReply(
+        true,
+        true,
+        "mesh_first_paint_done",
+        "mesh-first paint completed",
+        $$"""
+        {
+          "success": true,
+          "metadata": {
+            "local_route_mode": "server_packed_fallback",
+            "fallback_reason": "{{reason}}",
+            "fallback_batch_limit": 20,
+            "fallback_pacing_ms": 50
+          }
+        }
+        """);
+
+    var warning = HostSession.PaintFallbackWarning(reply);
+
+    Assert(warning == reason + " (server packed fallback: 20 strokes / 50 ms)",
+        "fallback warning should preserve the native error text and append fixed pacing");
+    Assert(HostSession.PaintFallbackWarning(reply with { Raw = "{\"success\":true}" }) is null,
+        "normal paint replies should not emit a fallback warning");
+}
+
 static void SettingsDetectSupportedSystemLanguage()
 {
     var previous = System.Globalization.CultureInfo.CurrentUICulture;
@@ -642,7 +712,9 @@ static void SettingsDetectSupportedSystemLanguage()
 static void UiSnapshotExposesTwoPassBrushesAndBatchSliders()
 {
     var snapshot = new PaintSnapshot(
+        true,
         17.5,
+        false,
         7.5,
         20,
         50,
@@ -662,7 +734,9 @@ static void UiSnapshotExposesTwoPassBrushesAndBatchSliders()
     });
     using var doc = JsonDocument.Parse(json);
 
+    Assert(doc.RootElement.GetProperty("brush1Enabled").GetBoolean(), "snapshot should expose brush 1 enabled");
     Assert(Math.Abs(doc.RootElement.GetProperty("brush1SizeTexels").GetDouble() - 17.5) < 0.000001, "snapshot should expose brush 1");
+    Assert(!doc.RootElement.GetProperty("brush2Enabled").GetBoolean(), "snapshot should expose brush 2 enabled");
     Assert(Math.Abs(doc.RootElement.GetProperty("brush2SizeTexels").GetDouble() - 7.5) < 0.000001, "snapshot should expose brush 2");
     Assert(doc.RootElement.GetProperty("packedBatchLimit").GetInt32() == 20, "snapshot should expose packedBatchLimit for editing");
     Assert(doc.RootElement.GetProperty("packedBatchPacingMs").GetInt32() == 50, "snapshot should expose packedBatchPacingMs for editing");
@@ -680,16 +754,36 @@ static void WebUiExposesTwoPassBrushSliders()
     var repository = FindRepositoryRoot();
     var index = File.ReadAllText(Path.Combine(repository, "src", "csharp", "MecchaCamouflage.WebHost", "web", "index.html"));
     var app = File.ReadAllText(Path.Combine(repository, "src", "csharp", "MecchaCamouflage.WebHost", "web", "app.js"));
+    var styles = File.ReadAllText(Path.Combine(repository, "src", "csharp", "MecchaCamouflage.WebHost", "web", "styles.css"));
 
     Assert(index.Contains("id=\"brush-1-size\"", StringComparison.Ordinal), "web UI should include the coarse brush slider");
     Assert(index.Contains("id=\"brush-2-size\"", StringComparison.Ordinal), "web UI should include the detail brush slider");
-    Assert(index.IndexOf("id=\"brush-1-size\"", StringComparison.Ordinal) < index.IndexOf("id=\"brush-2-size\"", StringComparison.Ordinal), "brush 1 should appear to the left of brush 2");
-    Assert(index.Contains("min=\"10\" max=\"30\" step=\"0.5\"", StringComparison.Ordinal), "brush 1 should expose the 10-30 range");
-    Assert(index.Contains("min=\"5\" max=\"10\" step=\"0.5\"", StringComparison.Ordinal), "brush 2 should expose the 5-10 range");
+    Assert(index.Contains("id=\"brush-1-enabled\"", StringComparison.Ordinal), "web UI should include the brush 1 checkbox");
+    Assert(index.Contains("id=\"brush-2-enabled\"", StringComparison.Ordinal), "web UI should include the brush 2 checkbox");
+    Assert(index.IndexOf("id=\"brush-1-size\"", StringComparison.Ordinal) < index.IndexOf("id=\"brush-2-size\"", StringComparison.Ordinal), "brush 1 should appear above brush 2");
+    Assert(index.Contains("min=\"10\" max=\"50\" step=\"0.5\"", StringComparison.Ordinal), "brush 1 should expose the 10-50 range");
+    Assert(index.Contains("min=\"1\" max=\"10\" step=\"0.5\"", StringComparison.Ordinal), "brush 2 should expose the 1-10 range");
+    Assert(index.Contains("id=\"packed-batch-limit\" class=\"setting-control\" disabled type=\"range\" min=\"1\" max=\"500\" step=\"1\"", StringComparison.Ordinal),
+        "batch limit should expose the 1-500 range");
+    Assert(index.Contains("id=\"packed-batch-pacing\" class=\"setting-control\" disabled type=\"range\" min=\"1\" max=\"500\" step=\"1\"", StringComparison.Ordinal),
+        "batch pacing should expose the 1-500 ms range in the normal direction");
+    Assert(!index.Contains("reverse-range", StringComparison.Ordinal),
+        "batch pacing should increase from left to right");
+    Assert(app.Contains("paint.brush1Enabled", StringComparison.Ordinal), "web UI should bind brush 1 enabled");
     Assert(app.Contains("paint.brush1SizeTexels", StringComparison.Ordinal), "web UI should bind brush 1");
+    Assert(app.Contains("paint.brush2Enabled", StringComparison.Ordinal), "web UI should bind brush 2 enabled");
     Assert(app.Contains("paint.brush2SizeTexels", StringComparison.Ordinal), "web UI should bind brush 2");
+    Assert(app.Contains("if (!paint.brush1Enabled && !paint.brush2Enabled)", StringComparison.Ordinal) &&
+           app.Contains("showError(\"At least one brush must be enabled.\")", StringComparison.Ordinal),
+        "web UI should retain editing and show an error instead of saving with both brushes off");
+    Assert(app.Contains("!editing || !paint.brush1Enabled", StringComparison.Ordinal) &&
+           app.Contains("!editing || !paint.brush2Enabled", StringComparison.Ordinal),
+        "web UI should disable each brush slider while its checkbox is off");
     Assert(!app.Contains("paint.brushSizeTexels", StringComparison.Ordinal), "web UI should not send the removed single-brush key");
     Assert(!app.Contains("coverageStepTexels", StringComparison.Ordinal), "web UI should not expose internal coverage compatibility");
+    Assert(styles.Contains(".brush-toggle > span", StringComparison.Ordinal) &&
+           styles.Contains("font: 700 12px/14px var(--font-mono)", StringComparison.Ordinal),
+        "brush labels should use the same typography as the other Geometry labels");
 }
 
 static void WebUiKeepsThemeColorOnReadonlyControls()
@@ -704,6 +798,8 @@ static void WebUiKeepsThemeColorOnReadonlyControls()
         "readonly range and checkbox controls should remain paint-enabled for Chromium accent rendering");
     Assert(styles.Contains("input.theme-visible-readonly[type=\"range\"]", StringComparison.Ordinal),
         "readonly sliders need a dedicated themed style");
+    Assert(styles.Contains("input.theme-visible-readonly[type=\"range\"] {\n  opacity: 0.55;", StringComparison.Ordinal),
+        "readonly sliders should visibly dim outside Edit mode");
     Assert(styles.Contains("input.theme-visible-readonly[type=\"checkbox\"]", StringComparison.Ordinal),
         "readonly checkboxes need a dedicated themed style");
     Assert(styles.Contains("pointer-events: none", StringComparison.Ordinal),
@@ -789,12 +885,12 @@ static void NativeProgressExposesReplayPassState()
 static void SettingsClampBatchSliders()
 {
     var settings = new AppSettings();
-    settings.Paint.PackedBatchLimit = 99;
+    settings.Paint.PackedBatchLimit = 999;
     settings.Paint.PackedBatchPacingMs = 750;
 
     var clamped = SettingsStore.Clamp(settings);
 
-    Assert(clamped.Paint.PackedBatchLimit == 20, "batch limit should clamp to the observed maximum");
+    Assert(clamped.Paint.PackedBatchLimit == 500, "batch limit should clamp to the configured maximum");
     Assert(clamped.Paint.PackedBatchPacingMs == 500, "batch pacing should clamp to maximum interval");
 
     settings.Paint.PackedBatchLimit = 0;
@@ -802,7 +898,7 @@ static void SettingsClampBatchSliders()
     clamped = SettingsStore.Clamp(settings);
 
     Assert(clamped.Paint.PackedBatchLimit == 1, "batch limit should clamp to one");
-    Assert(clamped.Paint.PackedBatchPacingMs == 50, "zero pacing must clamp to the safe 50 ms minimum");
+    Assert(clamped.Paint.PackedBatchPacingMs == 1, "zero pacing must clamp to one millisecond");
 }
 
 static void HotkeyValidationRejectsDuplicates()
@@ -859,6 +955,21 @@ static void HostSessionBrushUpdatesAreIndependentAndDetailSyncsCoverage()
     var snapshot = session.GetSnapshotAsync().GetAwaiter().GetResult();
     Assert(Math.Abs(snapshot.Settings.Paint.Brush1SizeTexels - 17.5) < 0.000001, "snapshot should expose brush 1");
     Assert(Math.Abs(snapshot.Settings.Paint.Brush2SizeTexels - 6.5) < 0.000001, "snapshot should expose brush 2");
+}
+
+static void HostSessionRejectsDisablingEveryBrush()
+{
+    using var temp = new TempHome();
+    var session = new HostSession("host-brush-required-test");
+
+    var result = session.UpdateSettings([
+        new SettingChange("paint.brush1Enabled", JsonSerializer.SerializeToElement(false)),
+        new SettingChange("paint.brush2Enabled", JsonSerializer.SerializeToElement(false))
+    ]);
+
+    Assert(!result.Success, "disabling every brush should be rejected");
+    Assert(result.Message.Contains("At least one brush", StringComparison.Ordinal), "the rejection should explain the requirement");
+    Assert(session.Settings.Paint.Brush2Enabled, "rejected settings must roll back");
 }
 
 static void HostSessionUpdatesBatchSliders()
@@ -1885,9 +1996,11 @@ static void ResearchRunnerRecordsTwoPassBrushesAndPackedLocalQueueMode()
         "src", "csharp", "MecchaCamouflage.Controller", "RuntimeBridgeService.cs"));
     var native = File.ReadAllText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
 
+    Assert(source.Contains("brush_1_enabled = paint.Brush1Enabled", StringComparison.Ordinal), "research artifacts should record brush 1 enabled");
     Assert(source.Contains("brush_1_size_texels = paint.Brush1SizeTexels", StringComparison.Ordinal), "research artifacts should record brush 1");
+    Assert(source.Contains("brush_2_enabled = paint.Brush2Enabled", StringComparison.Ordinal), "research artifacts should record brush 2 enabled");
     Assert(source.Contains("brush_2_size_texels = paint.Brush2SizeTexels", StringComparison.Ordinal), "research artifacts should record brush 2");
-    Assert(source.Contains("brush_pipeline_version = 2", StringComparison.Ordinal), "research artifacts should identify the two-pass pipeline");
+    Assert(!source.Contains("brush_pipeline_version = 2", StringComparison.Ordinal), "research artifacts should not version the brush pipeline");
     Assert(source.Contains("paintMode != \"packed-local-queue\"", StringComparison.Ordinal), "research runner should accept packed-local-queue mode");
     Assert(source.Contains("GetValueOrDefault(\"--paint-mode\", \"packed-local-queue\")", StringComparison.Ordinal), "research runner should default to the production-shaped packed local queue route");
     Assert(source.Contains("research_uv_replay_atlas", StringComparison.Ordinal), "research paint should explicitly request a pass-aware UV replay atlas");

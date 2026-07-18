@@ -35,7 +35,9 @@ public sealed record RuntimeSnapshot(
 public sealed record SettingsSnapshot(PaintSnapshot Paint, AppSnapshot App);
 
 public sealed record PaintSnapshot(
+    bool Brush1Enabled,
     double Brush1SizeTexels,
+    bool Brush2Enabled,
     double Brush2SizeTexels,
     int PackedBatchLimit,
     int PackedBatchPacingMs,

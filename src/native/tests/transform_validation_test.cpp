@@ -101,6 +101,13 @@ int main()
         return 8;
     }
 
+    const auto expanded = runtime_contract::resolve_pacing(500, 1, 500, 1000, 500, 6);
+    if (expanded.remote_batch_limit != 500 || expanded.remote_delay_ms != 1 ||
+        expanded.local_batch_limit != 6 || expanded.local_delay_ms != 17)
+    {
+        return 8;
+    }
+
     if (!runtime_contract::event_watch_generation_active(true, 7, 7) ||
         runtime_contract::event_watch_generation_active(false, 7, 7) ||
         runtime_contract::event_watch_generation_active(true, 8, 7))
@@ -144,19 +151,26 @@ int main()
     const auto routed_plan = runtime_contract::build_two_brush_replay_plan(
         routed_candidates,
         1024,
+        true,
         20.0,
+        true,
         10.0,
         80.0);
-    if (routed_plan.entries.size() != 3 ||
-        routed_plan.fill_end != 1 || routed_plan.coarse_end != 2 ||
-        routed_plan.fill_count != 1 || routed_plan.coarse_paint_count != 1 ||
+    if (routed_plan.entries.size() != 5 ||
+        routed_plan.fill_end != 3 || routed_plan.coarse_end != 4 ||
+        routed_plan.fill_count != 3 || routed_plan.coarse_paint_count != 1 ||
         routed_plan.fine_paint_count != 1 ||
+        routed_plan.fill_candidates != 3 || routed_plan.fill_deduplicated != 0 ||
         routed_plan.entries[0].pass != runtime_contract::ReplayPass::Fill ||
         routed_plan.entries[0].sample_index != 0 ||
-        routed_plan.entries[1].pass != runtime_contract::ReplayPass::CoarsePaint ||
+        routed_plan.entries[1].pass != runtime_contract::ReplayPass::Fill ||
         routed_plan.entries[1].sample_index != 1 ||
-        routed_plan.entries[2].pass != runtime_contract::ReplayPass::FinePaint ||
-        routed_plan.entries[2].sample_index != 1)
+        routed_plan.entries[2].pass != runtime_contract::ReplayPass::Fill ||
+        routed_plan.entries[2].sample_index != 2 ||
+        routed_plan.entries[3].pass != runtime_contract::ReplayPass::CoarsePaint ||
+        routed_plan.entries[3].sample_index != 1 ||
+        routed_plan.entries[4].pass != runtime_contract::ReplayPass::FinePaint ||
+        routed_plan.entries[4].sample_index != 1)
     {
         return 12;
     }
@@ -176,14 +190,16 @@ int main()
     const auto dedupe_plan = runtime_contract::build_two_brush_replay_plan(
         dedupe_candidates,
         1024,
+        true,
         20.0,
+        true,
         10.0,
         80.0);
-    if (dedupe_plan.entries.size() != 6 ||
-        dedupe_plan.fill_end != 1 || dedupe_plan.coarse_end != 3 ||
-        dedupe_plan.fill_count != 1 || dedupe_plan.coarse_paint_count != 2 ||
+    if (dedupe_plan.entries.size() != 8 ||
+        dedupe_plan.fill_end != 3 || dedupe_plan.coarse_end != 5 ||
+        dedupe_plan.fill_count != 3 || dedupe_plan.coarse_paint_count != 2 ||
         dedupe_plan.fine_paint_count != 3 ||
-        dedupe_plan.fill_candidates != 2 || dedupe_plan.fill_deduplicated != 1 ||
+        dedupe_plan.fill_candidates != 5 || dedupe_plan.fill_deduplicated != 2 ||
         dedupe_plan.coarse_paint_candidates != 3 || dedupe_plan.coarse_paint_deduplicated != 1 ||
         dedupe_plan.entries[0].sample_index != 0 ||
         dedupe_plan.entries[1].sample_index != 2 ||
@@ -192,7 +208,7 @@ int main()
         return 13;
     }
 
-    const std::vector<runtime_contract::TwoBrushReplayCandidate> reference_order_candidates{
+    const std::vector<runtime_contract::TwoBrushReplayCandidate> current_view_order_candidates{
         {0, runtime_contract::ReplayRegion::Back, runtime_contract::ReplayRegionMode::Paint,
          0, 0.10, 0.10, true, 90.0, 1000.0, 10.0, 0},
         {1, runtime_contract::ReplayRegion::Back, runtime_contract::ReplayRegionMode::Paint,
@@ -202,68 +218,69 @@ int main()
         {3, runtime_contract::ReplayRegion::Back, runtime_contract::ReplayRegionMode::Paint,
          0, 0.40, 0.40, false, 999.0, 80.0, 0.0, 3},
     };
-    const auto reference_order_plan = runtime_contract::build_two_brush_replay_plan(
-        reference_order_candidates,
+    const auto current_view_order_plan = runtime_contract::build_two_brush_replay_plan(
+        current_view_order_candidates,
         1024,
+        true,
         20.0,
+        true,
         10.0,
         80.0);
-    const std::array<std::size_t, 4> expected_reference_order{{2, 1, 0, 3}};
-    for (std::size_t index = 0; index < expected_reference_order.size(); ++index)
+    const std::array<std::size_t, 4> expected_current_view_order{{2, 1, 0, 3}};
+    for (std::size_t index = 0; index < expected_current_view_order.size(); ++index)
     {
-        if (reference_order_plan.entries[index].sample_index != expected_reference_order[index] ||
-            reference_order_plan.entries[reference_order_plan.coarse_end + index].sample_index != expected_reference_order[index])
+        if (current_view_order_plan.entries[index].sample_index != expected_current_view_order[index] ||
+            current_view_order_plan.entries[current_view_order_plan.coarse_end + index].sample_index != expected_current_view_order[index])
         {
             return 14;
         }
     }
-    if (!reference_order_plan.reference_position_fallback_used ||
-        reference_order_plan.reference_position_fallback_candidates != 1)
+    if (!current_view_order_plan.current_view_projection_fallback_used ||
+        current_view_order_plan.current_view_projection_fallback_candidates != 1)
     {
         return 14;
     }
 
-    const std::vector<runtime_contract::TwoBrushReplayCandidate> region_order_candidates{
+    const std::vector<runtime_contract::TwoBrushReplayCandidate> cross_region_view_order_candidates{
         {0, runtime_contract::ReplayRegion::Front, runtime_contract::ReplayRegionMode::Paint,
-         0, 0.10, 0.10, true, 100.0, 0.0, 0.0, 0},
+         0, 0.10, 0.10, true, 300.0, 0.0, 0.0, 0},
         {1, runtime_contract::ReplayRegion::Side, runtime_contract::ReplayRegionMode::Paint,
-         0, 0.10, 0.10, true, 100.0, 0.0, 0.0, 1},
+         0, 0.10, 0.10, true, 200.0, 0.0, 0.0, 1},
         {2, runtime_contract::ReplayRegion::Back, runtime_contract::ReplayRegionMode::Paint,
          0, 0.10, 0.10, true, 100.0, 0.0, 0.0, 2},
     };
-    const auto region_order_plan = runtime_contract::build_two_brush_replay_plan(
-        region_order_candidates,
+    const auto cross_region_view_order_plan = runtime_contract::build_two_brush_replay_plan(
+        cross_region_view_order_candidates,
         1024,
+        true,
         20.0,
+        true,
         10.0,
         80.0);
-    const std::array<std::size_t, 3> expected_region_order{{2, 1, 0}};
-    for (std::size_t index = 0; index < expected_region_order.size(); ++index)
+    const std::array<std::size_t, 3> expected_cross_region_view_order{{0, 1, 2}};
+    for (std::size_t index = 0; index < expected_cross_region_view_order.size(); ++index)
     {
-        if (region_order_plan.entries[index].sample_index != expected_region_order[index] ||
-            region_order_plan.entries[region_order_plan.coarse_end + index].sample_index != expected_region_order[index])
+        if (cross_region_view_order_plan.entries[index].sample_index != expected_cross_region_view_order[index] ||
+            cross_region_view_order_plan.entries[cross_region_view_order_plan.coarse_end + index].sample_index != expected_cross_region_view_order[index])
         {
             return 15;
         }
     }
 
-    const auto supported_brush_pipeline =
-        runtime_contract::resolve_brush_pipeline_version(2, false, false);
-    const auto missing_brush_pipeline =
-        runtime_contract::resolve_brush_pipeline_version(0, false, false);
-    const auto legacy_brush_pipeline =
-        runtime_contract::resolve_brush_pipeline_version(1, false, false);
-    const auto future_brush_pipeline =
-        runtime_contract::resolve_brush_pipeline_version(3, false, false);
-    const auto fractional_brush_pipeline =
-        runtime_contract::resolve_brush_pipeline_version(2.5, false, false);
-    const auto preview_without_brush_pipeline =
-        runtime_contract::resolve_brush_pipeline_version(0, true, false);
-    if (!supported_brush_pipeline.required || !supported_brush_pipeline.supported ||
-        missing_brush_pipeline.supported || legacy_brush_pipeline.supported ||
-        future_brush_pipeline.supported || fractional_brush_pipeline.supported ||
-        preview_without_brush_pipeline.required ||
-        !preview_without_brush_pipeline.supported)
+    const auto brush_1_only_plan = runtime_contract::build_two_brush_replay_plan(
+        routed_candidates, 1024, true, 25.0, false, 5.0, 100.0);
+    const auto brush_2_only_plan = runtime_contract::build_two_brush_replay_plan(
+        routed_candidates, 1024, false, 25.0, true, 5.0, 100.0);
+    if (brush_1_only_plan.entries.size() != 4 ||
+        brush_1_only_plan.fill_end != 3 || brush_1_only_plan.coarse_end != 4 ||
+        brush_1_only_plan.coarse_paint_count != 1 || brush_1_only_plan.fine_paint_count != 0 ||
+        brush_1_only_plan.entries[3].pass != runtime_contract::ReplayPass::CoarsePaint ||
+        brush_1_only_plan.entries[3].sample_index != 1 ||
+        brush_2_only_plan.entries.size() != 4 ||
+        brush_2_only_plan.fill_end != 3 || brush_2_only_plan.coarse_end != 3 ||
+        brush_2_only_plan.coarse_paint_count != 0 || brush_2_only_plan.fine_paint_count != 1 ||
+        brush_2_only_plan.entries[3].pass != runtime_contract::ReplayPass::FinePaint ||
+        brush_2_only_plan.entries[3].sample_index != 1)
     {
         return 16;
     }
@@ -284,9 +301,16 @@ int main()
         return 18;
     }
 
+    float triangle_world_radius = 0.0f;
     if (runtime_contract::PackedMeshAnchorWorldRadiusAuto != 0.0f ||
         runtime_contract::PackedMeshAnchorCoverageSafetyFactor != 0.91 ||
-        runtime_contract::PackedMeshAnchorExpectedRadiusCalibration != 3.5 ||
+        runtime_contract::PackedMeshAnchorProductionRadiusScale != 1.0 ||
+        !runtime_contract::PackedMeshAnchorProductionUsesTriangleWorldRadius ||
+        !runtime_contract::resolve_packed_triangle_world_radius(
+            124.27264,
+            5.0f / 1024.0f,
+            triangle_world_radius) ||
+        std::abs(triangle_world_radius - 0.6068f) > 0.0001f ||
         !runtime_contract::packed_mesh_anchor_requests_world_radius_conversion(
             runtime_contract::PackedMeshAnchorWorldRadiusAuto) ||
         runtime_contract::packed_mesh_anchor_requests_world_radius_conversion(20.0f / 1024.0f) ||
