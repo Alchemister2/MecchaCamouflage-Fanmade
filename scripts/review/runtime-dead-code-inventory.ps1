@@ -43,6 +43,9 @@ function Convert-ToWslPath {
         $rest = $matches[2] -replace "\\", "/"
         return "/mnt/$drive/$rest"
     }
+    if ($Path -match '^\\\\wsl(?:\.localhost|\$)\\[^\\]+\\(.*)$') {
+        return "/" + ($matches[1] -replace "\\", "/")
+    }
     $converted = & wsl.exe wslpath -a $Path
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($converted)) {
         throw "wslpath failed for: $Path"
@@ -168,9 +171,10 @@ $script:RgMode = Resolve-RgMode
 
 Push-Location $RepoRoot
 try {
-    Write-Utf8Lines -Path (Join-Path $OutDir "commit.txt") -Lines @((& git rev-parse HEAD 2>&1) | ForEach-Object { $_.ToString() })
-    Write-Utf8Lines -Path (Join-Path $OutDir "status.txt") -Lines @((& git status --short 2>&1) | ForEach-Object { $_.ToString() })
-    Write-Utf8Lines -Path (Join-Path $OutDir "source-files.txt") -Lines @((& git ls-files src resources scripts docs Makefile 2>&1) | ForEach-Object { $_.ToString() })
+    $repoGitArgs = @("-c", "safe.directory=$RepoRoot")
+    Write-Utf8Lines -Path (Join-Path $OutDir "commit.txt") -Lines @((& git @repoGitArgs rev-parse HEAD 2>&1) | ForEach-Object { $_.ToString() })
+    Write-Utf8Lines -Path (Join-Path $OutDir "status.txt") -Lines @((& git @repoGitArgs status --short 2>&1) | ForEach-Object { $_.ToString() })
+    Write-Utf8Lines -Path (Join-Path $OutDir "source-files.txt") -Lines @((& git @repoGitArgs ls-files src resources scripts docs Makefile 2>&1) | ForEach-Object { $_.ToString() })
 }
 finally {
     Pop-Location
