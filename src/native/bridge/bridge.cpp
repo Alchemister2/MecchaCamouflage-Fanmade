@@ -14447,31 +14447,10 @@ namespace
                               "paint_component_identity_changed");
                 return false;
             }
-            if (!live_uobject(job->controller) || !job->k2_get_pawn_function)
-            {
-                // Freecam and spectator-like states can detach the local pawn while
-                // the paint component and packed RPC target are still valid.
-                return true;
-            }
-
-            sdk::Controller_K2_GetPawn pawn_params{};
-            std::string process_failure{};
-            if (!process_event(job->controller, job->k2_get_pawn_function, reinterpret_cast<std::uint8_t*>(&pawn_params), process_failure))
-            {
-                return true;
-            }
-            const auto current_pawn = reinterpret_cast<std::uintptr_t>(pawn_params.ReturnValue);
-            if (!live_uobject(current_pawn))
-            {
-                return true;
-            }
-            if (current_pawn != job->pawn)
-            {
-                finish_failed("mesh_paint_context_changed",
-                              "Paint stopped because the local pawn changed",
-                              "local_pawn_changed");
-                return false;
-            }
+            // The captured component identity above is the paint-job guard.
+            // Freecam and spectator-like states can replace or detach the
+            // controller pawn while that component and its packed RPC target
+            // remain valid.
             return true;
         };
 

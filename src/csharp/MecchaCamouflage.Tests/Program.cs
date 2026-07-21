@@ -20,6 +20,7 @@ var tests = new List<(string Name, Action Run)>
     ("native local failures use fixed server packed fallback", NativeLocalFailuresUseFixedServerPackedFallback),
     ("native production radius follows each triangle and fill stays fixed", NativeProductionRadiusFollowsEachTriangleAndFillStaysFixed),
     ("native spatial replay follows the current pose and camera", NativeSpatialReplayFollowsCurrentPoseAndCamera),
+    ("native async paint tolerates freecam pawn transitions", NativeAsyncPaintToleratesFreecamPawnTransitions),
     ("payload includes packed route and fill material", PayloadIncludesPackedRouteAndFillMaterial),
     ("payload sends batch slider values", PayloadSendsBatchSliderValues),
     ("pre-mode pacing preserves saved delay", PreModePacingPreservesSavedDelay),
@@ -338,6 +339,22 @@ static void NativeSpatialReplayFollowsCurrentPoseAndCamera()
            !bridge.Contains("sample.reference_position.Z", StringComparison.Ordinal),
         "replay order must not use the mesh profile reference pose");
 }
+
+static void NativeAsyncPaintToleratesFreecamPawnTransitions()
+{
+    var bridge = File.ReadAllText(Path.Combine(
+        FindRepositoryRoot(),
+        "src", "native", "bridge", "bridge.cpp"));
+    var start = bridge.IndexOf("auto active_context_still_matches =", StringComparison.Ordinal);
+    var end = bridge.IndexOf("if (job->strokes.empty())", start, StringComparison.Ordinal);
+    Assert(start >= 0 && end > start, "async paint context guard should be present");
+    var guard = bridge[start..end];
+
+    Assert(guard.Contains("Freecam and spectator-like states can replace or detach the", StringComparison.Ordinal) &&
+           !guard.Contains("current_pawn != job->pawn", StringComparison.Ordinal),
+        "a valid captured paint component must remain paintable when freecam replaces the controller pawn");
+}
+
 
 static void PayloadIncludesPackedRouteAndFillMaterial()
 {
