@@ -15,9 +15,11 @@ namespace runtime_contract
     // ElementSize@0x34, PropertyFlags@0x38.
     constexpr std::size_t FPropertyElementSizeOffset = 0x34;
     constexpr int InternalNoResendMaxCallsPerTick = 6;
-    constexpr int DirectLocalImmediateRepostsPerDeferredWakeup = 1;
+    // Every local no-resend slice yields at least 1 ms. A zero-delay repost can
+    // monopolize the game thread on large texture replays.
+    constexpr int DirectLocalImmediateRepostsPerDeferredWakeup = 0;
     constexpr int MaximumNetworkBatchLimit = 500;
-    constexpr int FastLocalCadenceMs = 17;
+    constexpr int FastLocalCadenceMs = 1;
     constexpr int IncrementalTextureImportPacingMs = 100;
     constexpr int IncrementalTextureImportMinimumStrokes = 40;
     constexpr int FallbackOutgoingStrokesPerBatch = 20;
@@ -44,10 +46,11 @@ namespace runtime_contract
     constexpr std::size_t PackedPaintRecordWorldRadiusOffset = 23;
     constexpr std::size_t PackedPaintRecordSubdivisionOffset = 27;
 
-    // Ordinary color is sent through the verified Albedo route. A second,
-    // explicit Emissive stroke clears glow left by All-channel paint; format-2
-    // data alone does not make All reliably update that target on 2.9.0.
-    constexpr std::array<std::uint8_t, 2> ProductionMaterialPaintChannels{0, 6};
+    // UE 5.6 packs Metallic, Roughness, and Emissive into one material-properties
+    // render target (R/G/B).  Channel 7 updates that target atomically.  Splitting
+    // a sample into channels 5 and 6 doubles the packed work and allowed the
+    // separate local replication route to render a second visible pass.
+    constexpr std::array<std::uint8_t, 1> ProductionMaterialPaintChannels{7};
 
     constexpr std::size_t packed_paint_payload_size(std::size_t stroke_count)
     {
@@ -315,9 +318,15 @@ namespace runtime_contract
                                                         bool research_artifacts)
     {
         (void)auto_adapt;
-        return normal_paint_requires_packed &&
-               local_visual_sync_requested &&
-               !research_artifacts;
+        (void)normal_paint_requires_packed;
+        (void)local_visual_sync_requested;
+        (void)research_artifacts;
+        // Texture import remains the preview/restore transport.  For normal
+        // packed paint, replay the already-submitted strokes through the
+        // validated local paint function so painter-side rendering follows the
+        // same channel semantics as the game, including explicit Emissive
+        // clearing.
+        return false;
     }
 
     constexpr int incremental_texture_import_chunk_limit(int server_batch_limit)
@@ -388,7 +397,8 @@ namespace runtime_contract
     }
 
     // EPaintChannel: 0..3 address one render target, All addresses four, and
-    // AlbedoMetallicRoughness addresses three.  The game limit is expressed in
+    // AlbedoMetallicRoughness addresses three. UE 5.6's AMRE (7) uses the
+    // one packed material-properties target. The game limit is expressed in
     // render-target writes, not paint-stroke calls.
     constexpr int paint_channel_write_cost(int target_channel)
     {
@@ -766,7 +776,10 @@ namespace runtime_contract
     {
         return !preview_only &&
                !unpreview_only &&
-               research_artifacts &&
-               research_combined_no_resend;
+               // The direct reflected UFunction initiates game replication a
+               // second time. Production instead pairs its one ServerPacked
+               // submission with the validated internal renderer that does not
+               // resend. Research retains an explicit opt-in to compare routes.
+               (!research_artifacts || research_combined_no_resend);
     }
 }

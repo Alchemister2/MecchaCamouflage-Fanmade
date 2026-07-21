@@ -5,6 +5,12 @@ namespace MecchaCamouflage.Core;
 
 public sealed class SettingsStore
 {
+    // v1.6.1 introduced dedicated Fill PBR controls with a mirror-like default.
+    // That was especially misleading because Front defaults to Fill while the
+    // normal material controls default to a dielectric surface.  Only migrate
+    // the exact old defaults; any custom Fill material remains authoritative.
+    private const int FillPbrDefaultsFixLayoutVersion = 39;
+
     private static readonly JsonSerializerOptions Options = new()
     {
         WriteIndented = true,
@@ -86,10 +92,26 @@ public sealed class SettingsStore
         paint.AutoMaterial = ReadBool(root, "auto_material", paint.AutoMaterial);
         paint.Metallic = ReadDouble(root, "metallic", paint.Metallic);
         paint.Roughness = ReadDouble(root, "roughness", paint.Roughness);
+        paint.Emissive = ReadDouble(root, "emissive", paint.Emissive);
         if (RgbColor.TryParse(ReadString(root, "fill_color", paint.FillColor.ToHex()), out var fill))
             paint.FillColor = fill;
         paint.FillMetallic = ReadDouble(root, "fill_metallic", paint.FillMetallic);
         paint.FillRoughness = ReadDouble(root, "fill_roughness", paint.FillRoughness);
+        paint.FillEmissive = ReadDouble(root, "fill_emissive", paint.FillEmissive);
+        var hasPersistedFillPbr =
+            root.TryGetPropertyValue("fill_metallic", out _) &&
+            root.TryGetPropertyValue("fill_roughness", out _) &&
+            root.TryGetPropertyValue("fill_emissive", out _);
+        if (settings.LayoutVersion < FillPbrDefaultsFixLayoutVersion &&
+            hasPersistedFillPbr &&
+            Math.Abs(paint.FillMetallic - 1.0) < 0.000001 &&
+            Math.Abs(paint.FillRoughness) < 0.000001 &&
+            Math.Abs(paint.FillEmissive) < 0.000001)
+        {
+            paint.FillMetallic = paint.Metallic;
+            paint.FillRoughness = paint.Roughness;
+            paint.FillEmissive = paint.Emissive;
+        }
 
         return Clamp(settings);
     }
@@ -137,8 +159,10 @@ public sealed class SettingsStore
         settings.Paint.FrontBackSourceMaxUv = Math.Clamp(settings.Paint.FrontBackSourceMaxUv, 0.001, 2.00);
         settings.Paint.Metallic = Math.Clamp(settings.Paint.Metallic, 0.0, 1.0);
         settings.Paint.Roughness = Math.Clamp(settings.Paint.Roughness, 0.0, 1.0);
+        settings.Paint.Emissive = Math.Clamp(settings.Paint.Emissive, 0.0, 1.0);
         settings.Paint.FillMetallic = Math.Clamp(settings.Paint.FillMetallic, 0.0, 1.0);
         settings.Paint.FillRoughness = Math.Clamp(settings.Paint.FillRoughness, 0.0, 1.0);
+        settings.Paint.FillEmissive = Math.Clamp(settings.Paint.FillEmissive, 0.0, 1.0);
         return settings;
     }
 
@@ -175,9 +199,11 @@ public sealed class SettingsStore
         auto_material = settings.Paint.AutoMaterial,
         metallic = settings.Paint.Metallic,
         roughness = settings.Paint.Roughness,
+        emissive = settings.Paint.Emissive,
         fill_color = settings.Paint.FillColor.ToHex(),
         fill_metallic = settings.Paint.FillMetallic,
-        fill_roughness = settings.Paint.FillRoughness
+        fill_roughness = settings.Paint.FillRoughness,
+        fill_emissive = settings.Paint.FillEmissive
     };
 
     public static double CoverageStepFor(PaintSettings paint)

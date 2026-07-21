@@ -48,6 +48,13 @@ Review output is ignored under `artifacts/review/runtime-dead-code/`.
 Static search is evidence, not proof. Do not delete code only because an
 analyzer or `rg` shows few references.
 
+The inventory intentionally reports dynamic bridge entry points, reflection
+names/layouts, and research-only paths. Treat those categories as retained until
+their runtime contract is disproved. A release review must record whether the
+report contains a concrete, statically reachable deletion candidate; an
+inventory containing only these protected categories is not authorization to
+remove code.
+
 Deletion requires:
 
 - inventory evidence
@@ -103,34 +110,71 @@ directory.
 
 ## Paint Replication Rules
 
-Normal paint sends planned batches through `ServerPackedPaintBatch`, then
-coalesces already-submitted strokes into the painter's working Albedo,
-Metallic, and Roughness bytes and imports the three channels at a 100 ms
-cadence. Auto Adapt uses at least 40 strokes per local update; larger manual
-server batches remain one local update. Production must not replay every stroke through reflected
-`PaintAtUVWithBrush`, internal-common no-resend, or the native packed receiver
-queue; those routes remain research-only.
+Normal paint submits packed AMRE strokes through `ServerPackedPaintBatch` and
+applies those submitted strokes through the validated internal no-resend
+renderer. The AMRE target is one packed material-properties texture:
+`R=Metallic`, `G=Roughness`, and `B=Emissive`. Do not split it into separate
+PBR imports or replay it through reflected `PaintAtUVWithBrush`; both have
+previously created a second local pass or overwritten packed channels.
 
-The server schema, packed payload, and source ID remain fatal requirements. If
-the painter-local texture export/import fails, stop local work and continue
-`ServerPackedPaintBatch` at 20 strokes / 50 ms. Preserve
-`local_route_mode`, `fallback_reason`, `fallback_batch_limit`, and
-`fallback_pacing_ms` metadata.
+`ImportChannelFromBytes` is the Preview/Unpreview transport. The reflected
+`PaintAtUVWithBrush` and native packed receiver queue routes are explicit
+research A/B modes only.
+
+Auto Detect applies only to Paint regions. It obtains one global dominant
+material pattern from `GetDominantPaintMaterialPatterns`, including M/R/E, and
+therefore intentionally ignores the manual Paint PBR values for that request.
+Fill is always an explicit manual material, even when Auto Detect is on. Record
+the returned candidate list, selection, and first-stroke M/R/E before judging
+an Auto Detect result.
+
+The server schema, packed payload, source ID, and internal no-resend resolver
+remain fatal requirements. Do not silently switch normal paint to texture
+import, reflected local paint, or an unverified local route.
 
 When changing replication behavior, verify host and joining-client behavior
 separately. Painter-side completion is not enough; a normal other client must
 also receive the final result without returning to the old multi-minute drain
 path.
 
+## Debugging Game Updates And PBR
+
+Build a short numeric feedback loop before changing the production route.
+
+1. Reproduce with one region, one stroke, and a fresh research artifact
+   directory. Run only one research runner while its event-watch bridge is
+   active.
+2. Use distinguishable manual PBR values such as `M=.21`, `R=.83`, `E=.47`.
+   The packed texture result should be approximately `R=54`, `G=212`,
+   `B=120`; quantization is expected.
+3. Run the same controlled probe with Auto Detect on. Compare
+   `material_properties_candidates`, `material_properties_selection`, and the
+   first-stroke values. Auto Detect succeeding at a global `M=0/R=1/E=0` is
+   not evidence that the manual values were lost.
+4. For Preview, test Paint and Fill independently. Front defaults to Fill, so
+   changing Paint PBR does not change a Front Fill preview. Preview must be
+   restored on the same bridge that captured its snapshot.
+5. Treat a successful server RPC, a changed hash, an eyedropper reading, or a
+   screenshot as incomplete evidence on its own. Record changed-pixel values
+   and the selected component, then separately verify renderer/remote-client
+   completion where that claim matters.
+
+Never lower the recurring scheduler below its 1 ms safety floor or restore
+zero-delay reposts to make a benchmark look faster; this can monopolize the
+game thread and freeze the game. Do not reuse old RVAs, mutate queues or
+render-target memory, use `TerminateThread`, unload a bridge, or restart the
+game merely because a new controller starts. The direct bridge is designed to
+authenticate a fresh controller-owned instance in an already-running game.
+
 ### Game-update revalidation
 
 The native packed receiver route is not exact-build gated. After a game update,
-record the PE and `.text` identity for diagnosis, then verify the reflected
-`MulticastPackedPaintBatch` payload layout and the unique masked-signature chain
-from UFunction thunk through vtable implementation, decoder, manager resolver,
-enqueue, and coalescer. Never copy old RVAs forward as acceptance criteria. A
-missing, changed-ABI, or ambiguous candidate must disable local calls and select
-server packed fallback before the first RPC. Then repeat both multiplayer
+record the PE and `.text` identity for diagnosis, then verify the packed
+format, `FPaintChannelData`/`FPaintStroke` reflection layout (including
+Emissive), and the unique masked-signature chain from UFunction thunk through
+the internal no-resend renderer. Never copy old RVAs forward as acceptance
+criteria. A missing, changed-ABI, or ambiguous candidate must fail explicitly;
+do not substitute another local transport. Then repeat both multiplayer
 directions with event-watch, pressure/queue samples, and painter/receiver
 texture checksums.
 

@@ -12,9 +12,9 @@ Run these before preparing a tag:
 ```bash
 git status --branch --short
 make review-dead-code
-make clean
-make package
 git diff --check
+make clean
+make package VERSION=vX.Y.Z
 ```
 
 `make clean` removes `.build/` only. It does not remove `artifacts/`, because
@@ -35,6 +35,24 @@ Confirm:
 - source tree has no generated `bin/` or `obj`
 - shipped app resources are under `resources/`
 - source code is under `src/`
+- dead-code inventory contains no reviewed deletion candidate, or every such
+  candidate was removed with focused verification; dynamic entries, Unreal
+  reflection/layouts, and research-only paths are retained by default
+
+## Publication
+
+After the local and maintainer checks pass, create the annotated tag from the
+release commit, push the commit and tag, then create the GitHub Release with the
+single EXE from `.build/package/`.
+
+```bash
+git tag -a vX.Y.Z -m "vX.Y.Z"
+git push origin main --follow-tags
+gh release create vX.Y.Z .build/package/meccha-camouflage-vX.Y.Z.exe --title vX.Y.Z --notes-file <maintainer-notes.md>
+```
+
+Write release notes in GitHub before publishing. Do not regenerate, rewrite,
+or commit a maintainer-owned changelog as part of the packaging command.
 
 ## Runtime Packaging Checks
 
@@ -65,6 +83,16 @@ These require MECCHA CHAMELEON.
 - Start the app in a valid paintable match.
   - preview applies.
   - unpreview restores.
+  - test Preview Paint and Preview Fill separately. Front defaults to Fill, so
+    changing Paint PBR alone must not be used to judge a Front Fill preview.
+  - with a controlled manual value such as `M=.21/R=.83/E=.47`, the selected
+    packed PBR texture changes to approximately `R=54/G=212/B=120` in both
+    Preview Paint and Preview Fill. Restore on the same bridge and verify the
+    original snapshot returns.
+  - with Auto Detect enabled, record `material_properties_candidates`,
+    `material_properties_selection`, and the first-stroke M/R/E values. Auto
+    Detect applies only to Paint regions; Fill remains manual. A global
+    dominant `M=0/R=1/E=0` result is valid when the game returns that pattern.
   - repeated unpreview shows a guard warning.
   - cancel with no active paint shows a guard warning.
   - normal paint completes.
@@ -111,27 +139,27 @@ Collect these separately for painter-as-host and painter-as-joining-client:
 - painter-side completion time
 - other-client visible completion time
 - delay between painter completion and other-client completion
+- start a normal paint, then enter freecam or spectator mode while the captured
+  paint component remains valid; the job must continue rather than stop solely
+  because the controller pawn changed
 - crashes, disconnects, lobby returns, freezes, missing paint, or partial paint
 - event-watch counts if available:
   - `ServerPackedPaintBatch > 0`
   - `SendCustomStrokeBatchToServer == 0`
   - `ServerRelayPackedStrokeBatch == 0`
-  - `PaintAtUVWithBrush == 0`
+  - production does not use reflected `PaintAtUVWithBrush`
   - legacy full-stroke multicast calls are `0`
 - production-route metadata:
-  - either `local_route_mode == "local_texture_import"`, or
-    `local_route_mode == "server_packed_fallback"`
-  - for the local route:
-    - `local_texture_import_ok == true`
-    - `local_texture_import_export_ok == true`
-    - `local_texture_import_import_ok == true`
-    - `local_texture_import_strokes_painted` equals the planned stroke count
-    - `local_apply_calls_validated == 0`
-  - for fallback:
-    - `fallback_reason` preserves the triggering local error
-    - `fallback_batch_limit == 20`
-    - `fallback_pacing_ms == 50`
-    - no per-stroke local apply, enqueue, or queue-drain phase starts after fallback
+  - `local_route_mode == "validated_no_resend_direct"`
+  - `local_apply_route == "internal_common_no_resend"`
+  - `local_texture_import_started == false`
+  - `local_render_target_write_budget`, `local_cpu_budget_yields`, and
+    `local_dispatch_total_ms` are captured with the run. Do not lower the
+    recurring scheduler below its 1 ms safety floor merely to improve this
+    measurement.
+  - a missing packed schema, source ID, or internal no-resend resolver fails
+    explicitly; it must not silently choose texture import, reflected local
+    paint, or a receiver-queue route
   - `packed_mesh_radius_scale_effective == 1.0` in production
   - `packed_mesh_radius_scale_source == production_triangle_world_radius_per_stroke`
   - `replay_triangle_world_radius_normalization == per_stroke`
@@ -147,11 +175,11 @@ Collect these separately for painter-as-host and painter-as-joining-client:
   dump or the character as well: a regular point grid with gaps is a failure
   even when changed-texel count is nontrivial
 - normal Paint must not apply the completed Preview texture at start. Confirm
-  `local_texture_import_calls` advances with successful server batches and the
-  painter visibly progresses through Fill and enabled Brush passes.
-  Record `local_texture_import_compose_elapsed_ms` and
-  `local_texture_import_channel_elapsed_ms`; channel import must not be confused
-  with CPU-only stroke composition when investigating FPS drops.
+  the painter progresses through Fill and enabled Brush passes while the
+  internal no-resend renderer follows submitted server work. When investigating
+  FPS drops, record `local_dispatch_total_ms`, `local_cpu_budget_yields`, and
+  `local_write_budget_yields`; do not remove the 1 ms scheduler yield to make
+  a one-off benchmark faster.
 
 Do not release if joining-client paint crashes the server, or if other clients
 finish closer to the old multi-minute replication drain path than to the new

@@ -20,12 +20,17 @@ var tests = new List<(string Name, Action Run)>
     ("native local failures use fixed server packed fallback", NativeLocalFailuresUseFixedServerPackedFallback),
     ("native production radius follows each triangle and fill stays fixed", NativeProductionRadiusFollowsEachTriangleAndFillStaysFixed),
     ("native spatial replay follows the current pose and camera", NativeSpatialReplayFollowsCurrentPoseAndCamera),
+    ("native async paint tolerates freecam pawn transitions", NativeAsyncPaintToleratesFreecamPawnTransitions),
+    ("native production local sync uses per-stroke paint", NativeProductionLocalSyncUsesPerStrokePaint),
+    ("native preview applies PBR and emissive channels", NativePreviewAppliesPbrAndEmissiveChannels),
+    ("native auto material detects emissive and reports local pacing", NativeAutoMaterialDetectsEmissiveAndReportsLocalPacing),
     ("payload includes packed route and fill material", PayloadIncludesPackedRouteAndFillMaterial),
     ("payload sends batch slider values", PayloadSendsBatchSliderValues),
     ("pre-mode pacing preserves saved delay", PreModePacingPreservesSavedDelay),
     ("legacy auto pacing migrates to fastest sliders", LegacyAutoPacingMigratesToFastestSliders),
     ("legacy manual pacing migrates to sliders", LegacyManualPacingMigratesToSliders),
     ("legacy compatibility pacing migrates to sliders", LegacyCompatibilityPacingMigratesToSliders),
+    ("legacy mirror-like Fill PBR defaults migrate to manual material", LegacyFillPbrDefaultsMigrateToManualMaterial),
     ("settings clamp batch sliders", SettingsClampBatchSliders),
     ("locales have complete keys", LocalesHaveCompleteKeys),
     ("color parser accepts rrggbb", ColorParserAcceptsHex),
@@ -93,6 +98,9 @@ var tests = new List<(string Name, Action Run)>
     ("stale bridge request preserves replacement connection state", StaleBridgeRequestPreservesReplacementConnectionState),
     ("runtime exposes exact PID bridge startup", RuntimeExposesExactPidBridgeStartup),
     ("web startup lifecycle stabilizes after navigation and ui ready", WebStartupLifecycleStabilizesAfterNavigationAndUiReady),
+    ("app close shuts down the active bridge", AppCloseShutsDownActiveBridge),
+    ("native process event accepts a resident direct bridge hook", NativeProcessEventAcceptsResidentDirectBridgeHook),
+    ("runtime launch stages a local Windows copy", RuntimeLaunchStagesLocalWindowsCopy),
     ("direct bridge names avoid historical loader pattern", DirectBridgeNamesAvoidHistoricalLoaderPattern),
     ("release packaging contains only direct bridge components", ReleasePackagingContainsOnlyDirectBridge),
     ("release build excludes research runner and devtools", ReleaseBuildExcludesResearchRunnerAndDevTools)
@@ -267,9 +275,12 @@ static void NativeResearchNoResendRouteIsSignatureResolvedInsteadOfBuildGated()
            !resolver.Contains("main_module_text_identity_mismatch", StringComparison.Ordinal),
         "research no-resend route must not reject a build solely because its identity or RVAs changed");
     Assert(resolver.Contains("PaintAtUVWithBrush_param_layout_mismatch", StringComparison.Ordinal) &&
+           resolver.Contains("{\"channeldata\", 0x10, static_cast<int>(sizeof(sdk::FPaintChannelData))}", StringComparison.Ordinal) &&
+           resolver.Contains("{\"brushsettings\", 0x38, static_cast<int>(sizeof(sdk::FRuntimeBrushSettings))}", StringComparison.Ordinal) &&
+           resolver.Contains("{\"channel\", 0x60, 0x01}", StringComparison.Ordinal) &&
            resolver.Contains("internal_rel32_call_target", StringComparison.Ordinal) &&
            resolver.Contains("matches.size() != 1", StringComparison.Ordinal),
-        "research no-resend route must retain schema, signature, relative-call, and uniqueness validation");
+        "research no-resend route must validate the UE5.6 Emissive-aware parameter layout, signature, relative call, and uniqueness");
 }
 
 static void NativeLocalFailuresUseFixedServerPackedFallback()
@@ -339,6 +350,93 @@ static void NativeSpatialReplayFollowsCurrentPoseAndCamera()
         "replay order must not use the mesh profile reference pose");
 }
 
+static void NativeAsyncPaintToleratesFreecamPawnTransitions()
+{
+    var bridge = File.ReadAllText(Path.Combine(
+        FindRepositoryRoot(),
+        "src", "native", "bridge", "bridge.cpp"));
+    var start = bridge.IndexOf("auto active_context_still_matches =", StringComparison.Ordinal);
+    var end = bridge.IndexOf("if (job->strokes.empty())", start, StringComparison.Ordinal);
+    Assert(start >= 0 && end > start, "async paint context guard should be present");
+    var guard = bridge[start..end];
+
+    Assert(guard.Contains("Freecam and spectator-like states can replace or detach the", StringComparison.Ordinal) &&
+           !guard.Contains("current_pawn != job->pawn", StringComparison.Ordinal),
+        "a valid captured paint component must remain paintable when freecam replaces the controller pawn");
+}
+
+static void NativeProductionLocalSyncUsesPerStrokePaint()
+{
+    var contract = File.ReadAllText(Path.Combine(
+        FindRepositoryRoot(),
+        "src", "native", "include", "runtime_contract.hpp"));
+    var bridge = File.ReadAllText(Path.Combine(
+        FindRepositoryRoot(),
+        "src", "native", "bridge", "bridge.cpp"));
+    var start = contract.IndexOf("constexpr bool production_paint_uses_texture_import(", StringComparison.Ordinal);
+    var end = contract.IndexOf("constexpr int incremental_texture_import_chunk_limit(", start, StringComparison.Ordinal);
+    Assert(start >= 0 && end > start, "production local-sync policy should be present");
+    var policy = contract[start..end];
+
+    Assert(policy.Contains("return false;", StringComparison.Ordinal),
+        "normal packed paint must use the validated per-stroke local paint route, not texture import");
+    Assert(bridge.Contains("\\\"local_route_mode\\\":\\\"validated_no_resend_direct\\\"", StringComparison.Ordinal) &&
+           bridge.Contains("\\\"local_apply_route\\\":\\\"internal_common_no_resend\\\"", StringComparison.Ordinal) &&
+           bridge.Contains("server_packed_with_internal_no_resend_local_lockstep", StringComparison.Ordinal) &&
+           bridge.Contains("suppress_nested_self_multicast_exact_payload_only", StringComparison.Ordinal) &&
+           bridge.Contains("self_packed_multicast_suppressions", StringComparison.Ordinal) &&
+           bridge.Contains("direct_no_resend_committed_local_pending", StringComparison.Ordinal) &&
+           bridge.Contains("direct_no_resend_cancel_completing_committed_batch", StringComparison.Ordinal),
+        "production metadata must identify the non-echo local paint route, exact self-multicast suppression, and bounded cancel pairing");
+}
+
+static void NativePreviewAppliesPbrAndEmissiveChannels()
+{
+    var bridge = File.ReadAllText(Path.Combine(
+        FindRepositoryRoot(),
+        "src", "native", "bridge", "bridge.cpp"));
+
+    Assert(bridge.Contains("paint_albedo_metallic_roughness", StringComparison.Ordinal) &&
+           bridge.Contains("paint_emissive", StringComparison.Ordinal) &&
+           bridge.Contains("packed_pbr_export_mismatch", StringComparison.Ordinal) &&
+           bridge.Contains("sdk::EPaintChannel::AlbedoMetallicRoughnessEmissive", StringComparison.Ordinal) &&
+           bridge.Contains("unpreview_snapshot_emissive_bytes", StringComparison.Ordinal) &&
+           bridge.Contains("mesh_unpreview_packed_pbr_mismatch", StringComparison.Ordinal),
+        "preview and unpreview must preserve packed Metallic/Roughness/Emissive data without successive imports overwriting it");
+}
+
+static void NativeAutoMaterialDetectsEmissiveAndReportsLocalPacing()
+{
+    var bridge = File.ReadAllText(Path.Combine(
+        FindRepositoryRoot(),
+        "src", "native", "bridge", "bridge.cpp"));
+
+    Assert(bridge.Contains("mesh_first_get_dominant_emissive_properties", StringComparison.Ordinal) &&
+           bridge.Contains("sdk::EPaintChannel::Emissive", StringComparison.Ordinal) &&
+           bridge.Contains("material_properties_emissive_source", StringComparison.Ordinal),
+        "Auto Detect must derive Emissive from the game channel and report its source or fallback");
+    Assert(bridge.Contains("sizeof(MeshFirstPaintMaterialPattern) == 0x30", StringComparison.Ordinal) &&
+           bridge.Contains("offsetof(MeshFirstPaintMaterialPattern, emissive_color) == 0x18", StringComparison.Ordinal) &&
+           bridge.Contains("offsetof(MeshFirstPaintMaterialPattern, sample_count) == 0x2C", StringComparison.Ordinal) &&
+           bridge.Contains("material_properties_candidates", StringComparison.Ordinal) &&
+           bridge.Contains("packed_pbr_emissive_blue_mode", StringComparison.Ordinal) &&
+           bridge.Contains("PreferredSurfaceCoverageFloor = 0.01", StringComparison.Ordinal) &&
+           bridge.Contains("auto_material_fill_policy", StringComparison.Ordinal) &&
+           bridge.Contains("manual_fill_tuning", StringComparison.Ordinal) &&
+           bridge.Contains("material_properties_fill_manual_samples", StringComparison.Ordinal) &&
+           bridge.Contains("first_stroke_emissive", StringComparison.Ordinal),
+        "Auto Detect must cover Paint, preserve an explicit Fill material, use the UE5.6 Emissive-aware pattern layout, and expose numeric candidates for runtime verification");
+    Assert(bridge.Contains("tuning_auto_material && any_paint_region", StringComparison.Ordinal) &&
+           bridge.Contains("const double stroke_metallic = fill_metallic", StringComparison.Ordinal) &&
+           bridge.Contains("const double stroke_roughness = fill_roughness", StringComparison.Ordinal) &&
+           bridge.Contains("const double stroke_emissive = fill_emissive", StringComparison.Ordinal),
+        "Auto Detect must not override manual Metallic, Roughness, or Emissive values on Fill strokes");
+    Assert(bridge.Contains("local_cpu_budget_us", StringComparison.Ordinal) &&
+           bridge.Contains("local_render_target_write_budget", StringComparison.Ordinal) &&
+           bridge.Contains("local_logical_sample_batch_limit", StringComparison.Ordinal),
+        "normal local paint must report its CPU and write-budget pacing for live performance checks");
+}
+
 static void PayloadIncludesPackedRouteAndFillMaterial()
 {
     var settings = new AppSettings();
@@ -350,6 +448,8 @@ static void PayloadIncludesPackedRouteAndFillMaterial()
     settings.Paint.FillColor = new RgbColor(241, 17, 17);
     settings.Paint.FillMetallic = 1.0;
     settings.Paint.FillRoughness = 0.0;
+    settings.Paint.Emissive = 0.35;
+    settings.Paint.FillEmissive = 0.7;
 
     var payload = BridgePayloadBuilder.BuildPaintPayload(settings, 42, "Game.exe", new PaintRequestOptions());
     using var doc = JsonDocument.Parse(payload);
@@ -363,6 +463,8 @@ static void PayloadIncludesPackedRouteAndFillMaterial()
     Assert(tuning.GetProperty("server_batch_pacing_ms").GetInt32() == 88, "server batch pacing should be sent");
     Assert(tuning.GetProperty("fill_color").GetString() == "#F11111", "fill color missing");
     Assert(Math.Abs(tuning.GetProperty("fill_color_r").GetDouble() - (241.0 / 255.0)) < 0.00001, "fill red not normalized");
+    Assert(Math.Abs(tuning.GetProperty("emissive").GetDouble() - 0.35) < 0.00001, "paint emissive missing");
+    Assert(Math.Abs(tuning.GetProperty("fill_emissive").GetDouble() - 0.7) < 0.00001, "fill emissive missing");
     Assert(!tuning.TryGetProperty("enable_front_paint", out _), "legacy front bool must not be sent");
     Assert(!tuning.TryGetProperty("enable_side_paint", out _), "legacy side bool must not be sent");
     Assert(!tuning.TryGetProperty("enable_back_paint", out _), "legacy back bool must not be sent");
@@ -456,6 +558,49 @@ static void LegacyCompatibilityPacingMigratesToSliders()
 
     Assert(settings.Paint.PackedBatchLimit == 6, "compatibility mode should migrate to six strokes per RPC");
     Assert(settings.Paint.PackedBatchPacingMs == 75, "compatibility mode should migrate to 75 ms pacing");
+}
+
+static void LegacyFillPbrDefaultsMigrateToManualMaterial()
+{
+    using var temp = new TempHome();
+    var paths = new AppPaths("fill-pbr-defaults-migration-test");
+    Directory.CreateDirectory(paths.ConfigDirectory);
+    File.WriteAllText(paths.ConfigPath, """
+    {
+      "layout_version": 38,
+      "metallic": 0,
+      "roughness": 1,
+      "emissive": 0,
+      "fill_metallic": 1,
+      "fill_roughness": 0,
+      "fill_emissive": 0
+    }
+    """);
+
+    var migrated = new SettingsStore(paths).Load();
+    Assert(Math.Abs(migrated.Paint.FillMetallic) < 0.000001,
+        "the old mirror-like Fill metallic default should migrate to the manual material value");
+    Assert(Math.Abs(migrated.Paint.FillRoughness - 1.0) < 0.000001,
+        "the old mirror-like Fill roughness default should migrate to the manual material value");
+    Assert(Math.Abs(migrated.Paint.FillEmissive) < 0.000001,
+        "the Fill emissive default should migrate with the manual material value");
+
+    File.WriteAllText(paths.ConfigPath, """
+    {
+      "layout_version": 38,
+      "metallic": 0,
+      "roughness": 1,
+      "emissive": 0,
+      "fill_metallic": 0.7,
+      "fill_roughness": 0.2,
+      "fill_emissive": 0.1
+    }
+    """);
+    var custom = new SettingsStore(paths).Load();
+    Assert(Math.Abs(custom.Paint.FillMetallic - 0.7) < 0.000001 &&
+           Math.Abs(custom.Paint.FillRoughness - 0.2) < 0.000001 &&
+           Math.Abs(custom.Paint.FillEmissive - 0.1) < 0.000001,
+        "a non-default Fill PBR choice must not be changed by the migration");
 }
 
 static void PayloadSendsBatchSliderValues()
@@ -762,11 +907,13 @@ static void UiSnapshotExposesTwoPassBrushesAndBatchSliders()
         false,
         0.0,
         1.0,
+        0.0,
         "fill",
         "paint",
         "paint",
         "#FFFFFF",
         1.0,
+        0.0,
         0.0,
         true);
     var json = JsonSerializer.Serialize(snapshot, new JsonSerializerOptions
@@ -920,22 +1067,22 @@ static void NativeProgressExposesReplayPassState()
     Assert(json.Contains("replay_current_pass", StringComparison.Ordinal), "compact progress metadata should retain the current pass");
     Assert(bridge.Contains("production_paint_uses_texture_import", StringComparison.Ordinal) &&
            bridge.Contains("production_texture_import_requested", StringComparison.Ordinal) &&
-           bridge.Contains("server_packed_with_incremental_local_texture_import", StringComparison.Ordinal) &&
-           bridge.Contains("coalesced_incremental_local_texture_import", StringComparison.Ordinal) &&
-           bridge.Contains("IncrementalTextureImportPacingMs", StringComparison.Ordinal),
-        "production paint should coalesce painter-local texture imports independently of packed server pacing");
+           bridge.Contains("\\\"local_route_mode\\\":\\\"local_paint_at_uv\\\"", StringComparison.Ordinal) &&
+           bridge.Contains("paint_at_uv_with_brush_lockstep", StringComparison.Ordinal),
+        "production paint should replay packed-server strokes through the painter-local paint route");
     Assert(bridge.Contains("mesh_first_apply_local_material_import_preview", StringComparison.Ordinal) &&
            bridge.Contains("mesh_first_apply_local_material_import_increment", StringComparison.Ordinal) &&
+           bridge.Contains("sdk_call_paint_at_uv_with_brush", StringComparison.Ordinal) &&
            !bridge.Contains("production_direct_local_requested", StringComparison.Ordinal) &&
            !bridge.Contains("completed_before_server_submission", StringComparison.Ordinal),
-        "Auto Adapt and manual paint should use incremental imports instead of a completed preview before submission");
+        "preview/import tooling must remain separate from the production per-stroke local paint route");
     Assert(json.Contains("local_texture_import_ok", StringComparison.Ordinal) &&
            json.Contains("local_texture_import_calls", StringComparison.Ordinal) &&
            json.Contains("local_texture_import_strokes_painted", StringComparison.Ordinal) &&
            json.Contains("local_texture_import_compose_elapsed_ms", StringComparison.Ordinal) &&
            json.Contains("local_texture_import_channel_elapsed_ms", StringComparison.Ordinal) &&
            json.Contains("local_texture_import_elapsed_ms", StringComparison.Ordinal),
-        "compact production progress and replies should retain local texture-import evidence");
+        "compact preview/import progress and replies should retain texture-import evidence");
 }
 
 static void SettingsClampBatchSliders()
@@ -2074,8 +2221,34 @@ static void ResearchRunnerRecordsTwoPassBrushesAndPackedLocalQueueMode()
     Assert(source.Contains("TryNormalizeNonZeroHexAddress", StringComparison.Ordinal) &&
            source.Contains("ulong.TryParse", StringComparison.Ordinal),
         "joining receiver discovery must require a strict non-zero hexadecimal component address");
+    Assert(source.Contains("--target-channel", StringComparison.Ordinal) &&
+           source.Contains("research_target_channel", StringComparison.Ordinal) &&
+           native.Contains("research_single_channel", StringComparison.Ordinal),
+        "research runs must be able to isolate one live paint-channel enum without changing production fan-out");
+    Assert(source.Contains("--metallic", StringComparison.Ordinal) &&
+           source.Contains("--roughness", StringComparison.Ordinal) &&
+           source.Contains("--emissive", StringComparison.Ordinal) &&
+           source.Contains("ParseUnitIntervalOverride", StringComparison.Ordinal),
+        "research runs must support bounded PBR sentinel values for channel-contract checks");
+    Assert(source.Contains("--preview-only", StringComparison.Ordinal) &&
+           source.Contains("--unpreview-only", StringComparison.Ordinal) &&
+           source.Contains("not_applicable_preview_operation", StringComparison.Ordinal) &&
+           source.Contains("preview-cleanup-reply.json", StringComparison.Ordinal) &&
+           source.Contains("new PaintRequestOptions(UnPreviewOnly: true, ResearchArtifacts: true)", StringComparison.Ordinal),
+        "research preview runs must restore their material snapshot before the short-lived bridge shuts down");
+    Assert(source.Contains("--auto-material", StringComparison.Ordinal) &&
+           source.Contains("session.Settings.Paint.AutoMaterial = true", StringComparison.Ordinal),
+        "research runs must be able to capture the live auto-material decision separately from manual PBR sentinels");
     Assert(native.Contains("selected_texture_target_only", StringComparison.Ordinal),
         "texture diagnostics must avoid unrelated component readbacks that perturb joining-client timing");
+    Assert(native.Contains("emissive_export", StringComparison.Ordinal) &&
+           native.Contains("emissive_after_changed_rgba", StringComparison.Ordinal) &&
+           native.Contains("roughness_after_changed_rgba", StringComparison.Ordinal),
+        "research texture diagnostics must record all PBR channels and their changed output values");
+    Assert(native.Contains("channel_data_schema", StringComparison.Ordinal) &&
+           native.Contains("channel_enum_schema", StringComparison.Ordinal) &&
+           native.Contains("out_patterns_schema", StringComparison.Ordinal),
+        "research paint probes must report the live channel, enum, and auto-material pattern contracts");
     Assert(source.Contains("CancelPaintAfterDelayAsync(session.Runtime, cancelAfterMs, paintTask)", StringComparison.Ordinal) &&
            source.Contains("cancel_admission_latched", StringComparison.Ordinal) &&
            native.Contains("cancel_latched_paint_request", StringComparison.Ordinal),
@@ -2415,6 +2588,57 @@ static void DirectBridgeNamesAvoidHistoricalLoaderPattern()
     Assert(name.StartsWith("meccha-direct-bridge-v1-", StringComparison.Ordinal), "direct bridge prefix missing");
     Assert(name.Contains(hash, StringComparison.Ordinal), "direct bridge must include its full build hash");
     Assert(!name.Contains("runtime-bridge", StringComparison.OrdinalIgnoreCase), "historical loader pattern must not be used");
+}
+
+static void AppCloseShutsDownActiveBridge()
+{
+    var root = FindRepositoryRoot();
+    var form = File.ReadAllText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "MainForm.cs"));
+
+    Assert(form.Contains("FormClosing += HandleFormClosingAsync", StringComparison.Ordinal),
+        "the main form must own an explicit bridge shutdown close path");
+    Assert(form.Contains("await session.ShutdownBridgeAsync();", StringComparison.Ordinal),
+        "closing the app must await bridge shutdown before the form exits");
+    Assert(form.Contains("bridgeShutdownCompleted = true;", StringComparison.Ordinal) &&
+           form.Contains("if (!IsDisposed)", StringComparison.Ordinal) &&
+           form.Contains("Close();", StringComparison.Ordinal),
+        "the close path must resume the original close only after shutdown completion");
+}
+
+static void NativeProcessEventAcceptsResidentDirectBridgeHook()
+{
+    var root = FindRepositoryRoot();
+    var bridge = File.ReadAllText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+
+    Assert(bridge.Contains("address_in_resident_direct_bridge_module", StringComparison.Ordinal) &&
+           bridge.Contains("meccha-direct-bridge-v1-", StringComparison.Ordinal),
+        "the bridge must identify only a resident uniquely staged direct bridge hook");
+    Assert(bridge.Contains("page.State != MEM_COMMIT", StringComparison.Ordinal) &&
+           bridge.Contains("PAGE_EXECUTE_READ", StringComparison.Ordinal),
+        "resident bridge reuse must require an executable committed module page");
+    Assert(bridge.Contains("address_in_main_module(address) || address_in_bridge_module(address) ||", StringComparison.Ordinal) &&
+           bridge.Contains("address_in_resident_direct_bridge_module(address)", StringComparison.Ordinal),
+        "a new bridge must chain through one valid resident direct bridge hook rather than reject it");
+}
+
+static void RuntimeLaunchStagesLocalWindowsCopy()
+{
+    var root = FindRepositoryRoot();
+    var makefile = File.ReadAllText(Path.Combine(root, "Makefile"));
+    var start = File.ReadAllText(Path.Combine(root, "scripts", "start.ps1"));
+
+    Assert(makefile.Contains("START_PS := scripts/start.ps1", StringComparison.Ordinal) &&
+           makefile.Contains("-File \"$$PS_SCRIPT_WIN\" -SourceExe \"$$EXE_WIN\"", StringComparison.Ordinal),
+        "make start must invoke the dedicated staged launcher");
+    Assert(start.Contains("[Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)", StringComparison.Ordinal) &&
+           start.Contains("MecchaCamouflage\\launch", StringComparison.Ordinal) &&
+           start.Contains("Get-FileHash", StringComparison.Ordinal),
+        "the launcher must stage a hash-verified executable under LocalAppData");
+    Assert(start.Contains("Start-Process -FilePath $stagedExe -PassThru", StringComparison.Ordinal) &&
+           !start.Contains("-ArgumentList", StringComparison.Ordinal),
+        "an argument-free launch must not pass a null ArgumentList to PowerShell");
+    Assert(!makefile.Contains("Start-Process", StringComparison.Ordinal),
+        "make start must not directly run the build output that a later build must replace");
 }
 
 static void ReleasePackagingContainsOnlyDirectBridge()
