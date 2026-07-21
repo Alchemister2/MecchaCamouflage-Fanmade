@@ -104,18 +104,16 @@ directory.
 ## Paint Replication Rules
 
 Normal paint sends planned batches through `ServerPackedPaintBatch`, then
-coalesces already-submitted strokes into the painter's working Albedo,
-Metallic, and Roughness bytes and imports the three channels at a 100 ms
-cadence. Auto Adapt uses at least 40 strokes per local update; larger manual
-server batches remain one local update. Production must not replay every stroke through reflected
-`PaintAtUVWithBrush`, internal-common no-resend, or the native packed receiver
-queue; those routes remain research-only.
+replays those submitted strokes through the painter's reflected
+`PaintAtUVWithBrush` route. This keeps painter-side rendering on the game's
+paint path and applies the explicit Albedo/Emissive stroke pairs in order.
+`ImportChannelFromBytes` remains the preview/restore transport. Internal-common
+no-resend and the native packed receiver queue remain research-only.
 
-The server schema, packed payload, and source ID remain fatal requirements. If
-the painter-local texture export/import fails, stop local work and continue
-`ServerPackedPaintBatch` at 20 strokes / 50 ms. Preserve
-`local_route_mode`, `fallback_reason`, `fallback_batch_limit`, and
-`fallback_pacing_ms` metadata.
+The server schema, packed payload, source ID, and local paint-function layout
+remain fatal requirements. A local `PaintAtUVWithBrush` failure terminates the
+job with its native reason; do not silently switch to texture import or an
+unverified local route.
 
 When changing replication behavior, verify host and joining-client behavior
 separately. Painter-side completion is not enough; a normal other client must
@@ -129,8 +127,8 @@ record the PE and `.text` identity for diagnosis, then verify the reflected
 `MulticastPackedPaintBatch` payload layout and the unique masked-signature chain
 from UFunction thunk through vtable implementation, decoder, manager resolver,
 enqueue, and coalescer. Never copy old RVAs forward as acceptance criteria. A
-missing, changed-ABI, or ambiguous candidate must disable local calls and select
-server packed fallback before the first RPC. Then repeat both multiplayer
+missing, changed-ABI, or ambiguous local-paint candidate must fail explicitly;
+do not substitute another local transport. Then repeat both multiplayer
 directions with event-watch, pressure/queue samples, and painter/receiver
 texture checksums.
 

@@ -21,6 +21,7 @@ var tests = new List<(string Name, Action Run)>
     ("native production radius follows each triangle and fill stays fixed", NativeProductionRadiusFollowsEachTriangleAndFillStaysFixed),
     ("native spatial replay follows the current pose and camera", NativeSpatialReplayFollowsCurrentPoseAndCamera),
     ("native async paint tolerates freecam pawn transitions", NativeAsyncPaintToleratesFreecamPawnTransitions),
+    ("native production local sync uses per-stroke paint", NativeProductionLocalSyncUsesPerStrokePaint),
     ("payload includes packed route and fill material", PayloadIncludesPackedRouteAndFillMaterial),
     ("payload sends batch slider values", PayloadSendsBatchSliderValues),
     ("pre-mode pacing preserves saved delay", PreModePacingPreservesSavedDelay),
@@ -355,6 +356,24 @@ static void NativeAsyncPaintToleratesFreecamPawnTransitions()
         "a valid captured paint component must remain paintable when freecam replaces the controller pawn");
 }
 
+static void NativeProductionLocalSyncUsesPerStrokePaint()
+{
+    var contract = File.ReadAllText(Path.Combine(
+        FindRepositoryRoot(),
+        "src", "native", "include", "runtime_contract.hpp"));
+    var bridge = File.ReadAllText(Path.Combine(
+        FindRepositoryRoot(),
+        "src", "native", "bridge", "bridge.cpp"));
+    var start = contract.IndexOf("constexpr bool production_paint_uses_texture_import(", StringComparison.Ordinal);
+    var end = contract.IndexOf("constexpr int incremental_texture_import_chunk_limit(", start, StringComparison.Ordinal);
+    Assert(start >= 0 && end > start, "production local-sync policy should be present");
+    var policy = contract[start..end];
+
+    Assert(policy.Contains("return false;", StringComparison.Ordinal),
+        "normal packed paint must use the validated per-stroke local paint route, not texture import");
+    Assert(bridge.Contains("\\\"local_route_mode\\\":\\\"local_paint_at_uv\\\"", StringComparison.Ordinal),
+        "production metadata must identify the local per-stroke paint route");
+}
 
 static void PayloadIncludesPackedRouteAndFillMaterial()
 {
@@ -937,22 +956,22 @@ static void NativeProgressExposesReplayPassState()
     Assert(json.Contains("replay_current_pass", StringComparison.Ordinal), "compact progress metadata should retain the current pass");
     Assert(bridge.Contains("production_paint_uses_texture_import", StringComparison.Ordinal) &&
            bridge.Contains("production_texture_import_requested", StringComparison.Ordinal) &&
-           bridge.Contains("server_packed_with_incremental_local_texture_import", StringComparison.Ordinal) &&
-           bridge.Contains("coalesced_incremental_local_texture_import", StringComparison.Ordinal) &&
-           bridge.Contains("IncrementalTextureImportPacingMs", StringComparison.Ordinal),
-        "production paint should coalesce painter-local texture imports independently of packed server pacing");
+           bridge.Contains("\\\"local_route_mode\\\":\\\"local_paint_at_uv\\\"", StringComparison.Ordinal) &&
+           bridge.Contains("paint_at_uv_with_brush_lockstep", StringComparison.Ordinal),
+        "production paint should replay packed-server strokes through the painter-local paint route");
     Assert(bridge.Contains("mesh_first_apply_local_material_import_preview", StringComparison.Ordinal) &&
            bridge.Contains("mesh_first_apply_local_material_import_increment", StringComparison.Ordinal) &&
+           bridge.Contains("sdk_call_paint_at_uv_with_brush", StringComparison.Ordinal) &&
            !bridge.Contains("production_direct_local_requested", StringComparison.Ordinal) &&
            !bridge.Contains("completed_before_server_submission", StringComparison.Ordinal),
-        "Auto Adapt and manual paint should use incremental imports instead of a completed preview before submission");
+        "preview/import tooling must remain separate from the production per-stroke local paint route");
     Assert(json.Contains("local_texture_import_ok", StringComparison.Ordinal) &&
            json.Contains("local_texture_import_calls", StringComparison.Ordinal) &&
            json.Contains("local_texture_import_strokes_painted", StringComparison.Ordinal) &&
            json.Contains("local_texture_import_compose_elapsed_ms", StringComparison.Ordinal) &&
            json.Contains("local_texture_import_channel_elapsed_ms", StringComparison.Ordinal) &&
            json.Contains("local_texture_import_elapsed_ms", StringComparison.Ordinal),
-        "compact production progress and replies should retain local texture-import evidence");
+        "compact preview/import progress and replies should retain texture-import evidence");
 }
 
 static void SettingsClampBatchSliders()

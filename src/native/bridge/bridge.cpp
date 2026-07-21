@@ -13125,6 +13125,7 @@ namespace
         const bool fast_apply_manager_strokes = false;
         const bool fast_apply_manager_writes = false;
         const bool local_texture_import_available =
+            production_texture_import_requested &&
             ref.find_function(ctx.component, "ExportChannelToBytes") != 0 &&
             ref.find_function(ctx.component, "ImportChannelFromBytes") != 0;
         metadata += ",\"server_paint_target_channel\":\"albedo_then_emissive_clear\"";
@@ -13166,6 +13167,11 @@ namespace
         }
         else if (local_visual_sync_enabled)
         {
+            if (normal_paint_requires_packed && !use_packed_local_queue &&
+                !use_internal_no_resend_local_apply)
+            {
+                metadata += ",\"local_route_mode\":\"local_paint_at_uv\"";
+            }
             metadata += ",\"local_paint_rpc\":\"" +
                         std::string(use_packed_local_queue
                                         ? "native_packed_receiver_queue"

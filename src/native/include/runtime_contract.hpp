@@ -315,9 +315,15 @@ namespace runtime_contract
                                                         bool research_artifacts)
     {
         (void)auto_adapt;
-        return normal_paint_requires_packed &&
-               local_visual_sync_requested &&
-               !research_artifacts;
+        (void)normal_paint_requires_packed;
+        (void)local_visual_sync_requested;
+        (void)research_artifacts;
+        // Texture import remains the preview/restore transport.  For normal
+        // packed paint, replay the already-submitted strokes through the
+        // validated local paint function so painter-side rendering follows the
+        // same channel semantics as the game, including explicit Emissive
+        // clearing.
+        return false;
     }
 
     constexpr int incremental_texture_import_chunk_limit(int server_batch_limit)

@@ -111,22 +111,23 @@ Collect these separately for painter-as-host and painter-as-joining-client:
 - painter-side completion time
 - other-client visible completion time
 - delay between painter completion and other-client completion
+- start a normal paint, then enter freecam or spectator mode while the captured
+  paint component remains valid; the job must continue rather than stop solely
+  because the controller pawn changed
 - crashes, disconnects, lobby returns, freezes, missing paint, or partial paint
 - event-watch counts if available:
   - `ServerPackedPaintBatch > 0`
   - `SendCustomStrokeBatchToServer == 0`
   - `ServerRelayPackedStrokeBatch == 0`
-  - `PaintAtUVWithBrush == 0`
+  - `PaintAtUVWithBrush > 0`
   - legacy full-stroke multicast calls are `0`
 - production-route metadata:
-  - either `local_route_mode == "local_texture_import"`, or
+  - either `local_route_mode == "local_paint_at_uv"`, or
     `local_route_mode == "server_packed_fallback"`
   - for the local route:
-    - `local_texture_import_ok == true`
-    - `local_texture_import_export_ok == true`
-    - `local_texture_import_import_ok == true`
-    - `local_texture_import_strokes_painted` equals the planned stroke count
-    - `local_apply_calls_validated == 0`
+    - `local_paint_rpc == "PaintAtUVWithBrush"`
+    - `local_strokes_synced` equals the planned stroke count
+    - `local_texture_import_started == false`
   - for fallback:
     - `fallback_reason` preserves the triggering local error
     - `fallback_batch_limit == 20`
@@ -147,11 +148,11 @@ Collect these separately for painter-as-host and painter-as-joining-client:
   dump or the character as well: a regular point grid with gaps is a failure
   even when changed-texel count is nontrivial
 - normal Paint must not apply the completed Preview texture at start. Confirm
-  `local_texture_import_calls` advances with successful server batches and the
-  painter visibly progresses through Fill and enabled Brush passes.
-  Record `local_texture_import_compose_elapsed_ms` and
-  `local_texture_import_channel_elapsed_ms`; channel import must not be confused
-  with CPU-only stroke composition when investigating FPS drops.
+  `local_strokes_synced` advances with successful server submissions and the
+  painter visibly progresses through Fill and enabled Brush passes. Confirm
+  `local_texture_import_started == false`; it is reserved for preview/restore,
+  not normal paint. When investigating FPS drops, record the local
+  `PaintAtUVWithBrush` event rate rather than texture-import timings.
 
 Do not release if joining-client paint crashes the server, or if other clients
 finish closer to the old multi-minute replication drain path than to the new

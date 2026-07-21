@@ -28,25 +28,21 @@ research build script when those capabilities are required.
 Normal multiplayer paint uses independent server and painter-local lanes:
 
 - `RuntimePaintableComponent.ServerPackedPaintBatch` sends the server batch.
-- The painter coalesces only successfully submitted strokes into working
-  Albedo, Metallic, and Roughness bytes and calls `ImportChannelFromBytes` at
-  most every 100 ms. The local chunk is at least 40 strokes, or one larger
-  configured server batch, and never crosses a Fill/Brush pass boundary. This
-  preserves pass order without applying the completed Preview texture at paint
-  start.
+- The painter applies successfully submitted strokes through
+  `PaintAtUVWithBrush`, respecting the server/local cursor and the local
+  render-target write budget. The adjacent Albedo and Emissive-clear strokes
+  stay in order.
 - The game module identity and resolved RVAs are diagnostics, not version gates.
-- If local texture export/import fails, no per-stroke local fallback is used.
-  `ServerPackedPaintBatch` continues at the fixed
-  fallback rate of 20 strokes / 50 ms.
+- If local paint cannot be called, paint fails with the native reason; it does
+  not substitute texture import after server submission.
 - Normal paint never falls back automatically to internal-common no-resend,
-  the packed receiver queue, reflected `PaintAtUVWithBrush`, compact/adaptive
-  routes, or a texture-sync transport.
+  the packed receiver queue, compact/adaptive routes, or a texture-sync
+  transport.
 - Auto Adapt defaults ON and derives the fastest safe batch/pacing values from
   readable game-owned limits, falling back to 20 strokes / 50 ms when those
   properties are unavailable. Its controls are disabled while ON. With Auto
-  Adapt OFF, both server controls are editable from 1--500. Painter-local
-  import is identical in both modes. If it fails before submission, paint
-  continues server-only at 20/50 and emits one WARN with the fallback values.
+  Adapt OFF, both server controls are editable from 1--500. The local paint
+  lane remains bounded by its render-target write budget in both modes.
 
 Brush 1 and Brush 2 are independently enabled. Brush 1 ranges from 10--50
 texels, defaults to 25, and defaults OFF. Brush 2 ranges from 1--10 texels,

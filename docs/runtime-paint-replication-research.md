@@ -31,13 +31,12 @@ Normal paint uses the direct component route:
 - the effective subdivision tail is exactly `level=0`, `pixel-size=0`,
   `template-resolution=0`, allowing receiver preflight to select the component
   defaults. These fields are not brush diameter bytes
-- if painter-local texture export/import fails, local work stops and
-  `ServerPackedPaintBatch` continues at the fixed
-  20 strokes / 50 ms fallback rate
+- normal painter-local rendering uses reflected `PaintAtUVWithBrush` after the
+  corresponding packed server submission; preview/restore alone use texture
+  export/import
 - no fallback to old compact/adaptive `SendCustom` path
 - no automatic fallback to internal-common no-resend, the packed receiver
-  queue, or reflected `PaintAtUVWithBrush`; they remain explicit research A/B
-  modes
+  queue, or texture-sync transport; those remain explicit research A/B modes
 - server packed schema/payload/source-ID failure still stops paint with explicit
   metadata
 
@@ -53,11 +52,11 @@ Different camouflage colors therefore commonly turn one packed network batch
 into per-stroke surface generation. Network batch size and render batch size
 must not be treated as equivalent in FPS analysis.
 
-Painter-local texture import is not remote-peer pressure and does not back off
-the outgoing server lane, but it follows the successfully submitted stroke
-cursor so the painter sees Fill and Brush passes progress in order. Remote
-game-owned receiver/render budgets still drain asynchronously. The production
-route must remain small and deterministic.
+Painter-local paint is not remote-peer pressure and does not back off the
+outgoing server lane, but it follows the successfully submitted stroke cursor
+so the painter sees Fill and Brush passes progress in order. Remote game-owned
+receiver/render budgets still drain asynchronously. The production route must
+remain small and deterministic.
 Research probes and artifact collection must not change normal route selection;
 research mode names explicitly choose their A/B route.
 

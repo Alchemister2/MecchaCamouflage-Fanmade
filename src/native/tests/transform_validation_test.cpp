@@ -120,8 +120,8 @@ int main()
         return 8;
     }
 
-    if (!runtime_contract::production_paint_uses_texture_import(false, true, true, false) ||
-        !runtime_contract::production_paint_uses_texture_import(true, true, true, false) ||
+    if (runtime_contract::production_paint_uses_texture_import(false, true, true, false) ||
+        runtime_contract::production_paint_uses_texture_import(true, true, true, false) ||
         runtime_contract::production_paint_uses_texture_import(false, false, true, false) ||
         runtime_contract::production_paint_uses_texture_import(false, true, false, false) ||
         runtime_contract::production_paint_uses_texture_import(false, true, true, true))
