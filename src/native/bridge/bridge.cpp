@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <cwctype>
 #include <initializer_list>
 #include <limits>
 #include <memory>
@@ -923,9 +924,62 @@ namespace
         return false;
     }
 
+    auto address_in_resident_direct_bridge_module(std::uintptr_t address) -> bool
+    {
+        if (!address)
+        {
+            return false;
+        }
+        HMODULE module = nullptr;
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                reinterpret_cast<LPCWSTR>(address),
+                                &module) ||
+            module == nullptr || module == g_module)
+        {
+            return false;
+        }
+        MEMORY_BASIC_INFORMATION page{};
+        if (VirtualQuery(reinterpret_cast<const void*>(address), &page, sizeof(page)) != sizeof(page) ||
+            page.State != MEM_COMMIT || page.AllocationBase != module)
+        {
+            return false;
+        }
+        const DWORD access = page.Protect & 0xFFu;
+        if (access != PAGE_EXECUTE && access != PAGE_EXECUTE_READ &&
+            access != PAGE_EXECUTE_READWRITE && access != PAGE_EXECUTE_WRITECOPY)
+        {
+            return false;
+        }
+        wchar_t module_path[MAX_PATH]{};
+        const DWORD path_length = GetModuleFileNameW(module, module_path, MAX_PATH);
+        if (path_length == 0 || path_length >= MAX_PATH)
+        {
+            return false;
+        }
+        const std::wstring path(module_path, path_length);
+        const auto separator = path.find_last_of(L"\\/");
+        const std::wstring file_name = separator == std::wstring::npos ? path : path.substr(separator + 1);
+        static constexpr wchar_t DirectBridgePrefix[] = L"meccha-direct-bridge-v1-";
+        constexpr std::size_t PrefixLength = sizeof(DirectBridgePrefix) / sizeof(DirectBridgePrefix[0]) - 1;
+        if (file_name.size() <= PrefixLength)
+        {
+            return false;
+        }
+        for (std::size_t index = 0; index < PrefixLength; ++index)
+        {
+            if (std::towlower(file_name[index]) != DirectBridgePrefix[index])
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
     auto trusted_process_event_target(std::uintptr_t address) -> bool
     {
-        return address_in_main_module(address) || address_in_bridge_module(address);
+        return address_in_main_module(address) || address_in_bridge_module(address) ||
+               address_in_resident_direct_bridge_module(address);
     }
 
     auto live_uobject(std::uintptr_t object) -> bool
@@ -12946,11 +13000,12 @@ namespace
         metadata += "]";
         MeshFirstMaterialProperties material_properties{};
         MeshFirstEmissiveProperties emissive_properties{};
-        // Fill uses the same surface material as Paint when Auto Detect is
-        // enabled.  Previously an all-Fill replay skipped this query and kept
-        // its independent Fill defaults (Metallic=1, Roughness=0), making the
-        // Auto Detect toggle appear ineffective on the default Front Fill.
-        const bool auto_material_requested = tuning_auto_material && !replay_plan.entries.empty();
+        // Fill is an explicit replacement material: keep the three Fill PBR
+        // controls authoritative even when Auto Detect is enabled for Paint.
+        // Apart from honouring the UI value, skipping source sampling for an
+        // all-Fill request avoids doing an unnecessary render-target readback.
+        const bool auto_material_requested =
+            tuning_auto_material && any_paint_region && !replay_plan.entries.empty();
         if (auto_material_requested)
         {
             material_properties = mesh_first_get_dominant_material_properties(ref, ctx.component);
@@ -12969,21 +13024,13 @@ namespace
             }
         }
         metadata += ",\"material_properties_source\":\"" +
-                    std::string(!tuning_auto_material
+                    std::string(!auto_material_requested
                                     ? (any_paint_region ? "manual_tuning" : "manual_fill_tuning")
                                     : (material_properties.ok
                                            ? material_properties.selection
-                                           : (any_paint_region
-                                                  ? "source_samples_fallback"
-                                                  : "manual_fill_fallback"))) +
+                                           : "source_samples_fallback")) +
                     "\"";
-        metadata += ",\"auto_material_fill_policy\":\"" +
-                    std::string(tuning_auto_material
-                                    ? (material_properties.ok
-                                           ? "detected_surface_material"
-                                           : "manual_fill_fallback")
-                                    : "manual_fill_tuning") +
-                    "\"";
+        metadata += ",\"auto_material_fill_policy\":\"manual_fill_tuning\"";
         metadata += ",\"material_properties_auto_ok\":" + std::string(json_bool(material_properties.ok));
         metadata += ",\"material_properties_selection\":\"" +
                     json_escape(material_properties.selection) + "\"";
@@ -13016,13 +13063,11 @@ namespace
         }
         metadata += "]";
         metadata += ",\"material_properties_emissive_source\":\"" +
-                    std::string(!tuning_auto_material
+                    std::string(!auto_material_requested
                                     ? (any_paint_region ? "manual_tuning" : "manual_fill_tuning")
                                     : (emissive_properties.ok
                                            ? emissive_properties.source
-                                           : (any_paint_region
-                                                  ? "manual_fallback"
-                                                  : "manual_fill_fallback"))) +
+                                           : "manual_fallback")) +
                     "\"";
         metadata += ",\"material_properties_emissive_auto_ok\":" +
                     std::string(json_bool(emissive_properties.ok));
@@ -13036,7 +13081,7 @@ namespace
                     std::to_string(emissive_properties.dominant_pixel_count);
         int material_properties_auto_samples = 0;
         int material_properties_source_sample_fallbacks = 0;
-        int material_properties_fill_manual_fallbacks = 0;
+        int material_properties_fill_manual_samples = 0;
         int material_properties_emissive_auto_samples = 0;
         int material_properties_emissive_manual_fallbacks = 0;
         int replay_spatial_sort_partitions = 0;
@@ -13081,31 +13126,10 @@ namespace
             sdk::FPaintChannelData channel{};
             if (fill_mode)
             {
-                double stroke_metallic = fill_metallic;
-                double stroke_roughness = fill_roughness;
-                double stroke_emissive = fill_emissive;
-                if (tuning_auto_material)
-                {
-                    if (material_properties.ok)
-                    {
-                        stroke_metallic = material_properties.metallic;
-                        stroke_roughness = material_properties.roughness;
-                        ++material_properties_auto_samples;
-                    }
-                    else
-                    {
-                        ++material_properties_fill_manual_fallbacks;
-                    }
-                    if (emissive_properties.ok)
-                    {
-                        stroke_emissive = emissive_properties.emissive;
-                        ++material_properties_emissive_auto_samples;
-                    }
-                    else
-                    {
-                        ++material_properties_emissive_manual_fallbacks;
-                    }
-                }
+                const double stroke_metallic = fill_metallic;
+                const double stroke_roughness = fill_roughness;
+                const double stroke_emissive = fill_emissive;
+                ++material_properties_fill_manual_samples;
                 const auto apply_mode = research_apply_mode >= 0
                                             ? static_cast<sdk::EPaintChannelApplyMode>(research_apply_mode)
                                             : sdk::EPaintChannelApplyMode::Override;
@@ -13279,8 +13303,8 @@ namespace
         metadata += ",\"replay_spatial_sort_elapsed_ms\":" + std::to_string(replay_spatial_sort_elapsed_ms);
         metadata += ",\"material_properties_auto_samples\":" + std::to_string(material_properties_auto_samples);
         metadata += ",\"material_properties_source_sample_fallbacks\":" + std::to_string(material_properties_source_sample_fallbacks);
-        metadata += ",\"material_properties_fill_manual_fallbacks\":" +
-                    std::to_string(material_properties_fill_manual_fallbacks);
+        metadata += ",\"material_properties_fill_manual_samples\":" +
+                    std::to_string(material_properties_fill_manual_samples);
         metadata += ",\"material_properties_emissive_auto_samples\":" +
                     std::to_string(material_properties_emissive_auto_samples);
         metadata += ",\"material_properties_emissive_manual_fallbacks\":" +

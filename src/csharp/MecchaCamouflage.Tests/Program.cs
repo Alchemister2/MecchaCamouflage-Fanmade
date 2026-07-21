@@ -98,6 +98,9 @@ var tests = new List<(string Name, Action Run)>
     ("stale bridge request preserves replacement connection state", StaleBridgeRequestPreservesReplacementConnectionState),
     ("runtime exposes exact PID bridge startup", RuntimeExposesExactPidBridgeStartup),
     ("web startup lifecycle stabilizes after navigation and ui ready", WebStartupLifecycleStabilizesAfterNavigationAndUiReady),
+    ("app close shuts down the active bridge", AppCloseShutsDownActiveBridge),
+    ("native process event accepts a resident direct bridge hook", NativeProcessEventAcceptsResidentDirectBridgeHook),
+    ("runtime launch stages a local Windows copy", RuntimeLaunchStagesLocalWindowsCopy),
     ("direct bridge names avoid historical loader pattern", DirectBridgeNamesAvoidHistoricalLoaderPattern),
     ("release packaging contains only direct bridge components", ReleasePackagingContainsOnlyDirectBridge),
     ("release build excludes research runner and devtools", ReleaseBuildExcludesResearchRunnerAndDevTools)
@@ -419,10 +422,15 @@ static void NativeAutoMaterialDetectsEmissiveAndReportsLocalPacing()
            bridge.Contains("packed_pbr_emissive_blue_mode", StringComparison.Ordinal) &&
            bridge.Contains("PreferredSurfaceCoverageFloor = 0.01", StringComparison.Ordinal) &&
            bridge.Contains("auto_material_fill_policy", StringComparison.Ordinal) &&
-           bridge.Contains("detected_surface_material", StringComparison.Ordinal) &&
-           bridge.Contains("material_properties_fill_manual_fallbacks", StringComparison.Ordinal) &&
+           bridge.Contains("manual_fill_tuning", StringComparison.Ordinal) &&
+           bridge.Contains("material_properties_fill_manual_samples", StringComparison.Ordinal) &&
            bridge.Contains("first_stroke_emissive", StringComparison.Ordinal),
-        "Auto Detect must cover Fill as well as Paint, use the UE5.6 Emissive-aware pattern layout, and expose numeric candidates for runtime verification");
+        "Auto Detect must cover Paint, preserve an explicit Fill material, use the UE5.6 Emissive-aware pattern layout, and expose numeric candidates for runtime verification");
+    Assert(bridge.Contains("tuning_auto_material && any_paint_region", StringComparison.Ordinal) &&
+           bridge.Contains("const double stroke_metallic = fill_metallic", StringComparison.Ordinal) &&
+           bridge.Contains("const double stroke_roughness = fill_roughness", StringComparison.Ordinal) &&
+           bridge.Contains("const double stroke_emissive = fill_emissive", StringComparison.Ordinal),
+        "Auto Detect must not override manual Metallic, Roughness, or Emissive values on Fill strokes");
     Assert(bridge.Contains("local_cpu_budget_us", StringComparison.Ordinal) &&
            bridge.Contains("local_render_target_write_budget", StringComparison.Ordinal) &&
            bridge.Contains("local_logical_sample_batch_limit", StringComparison.Ordinal),
@@ -2580,6 +2588,57 @@ static void DirectBridgeNamesAvoidHistoricalLoaderPattern()
     Assert(name.StartsWith("meccha-direct-bridge-v1-", StringComparison.Ordinal), "direct bridge prefix missing");
     Assert(name.Contains(hash, StringComparison.Ordinal), "direct bridge must include its full build hash");
     Assert(!name.Contains("runtime-bridge", StringComparison.OrdinalIgnoreCase), "historical loader pattern must not be used");
+}
+
+static void AppCloseShutsDownActiveBridge()
+{
+    var root = FindRepositoryRoot();
+    var form = File.ReadAllText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "MainForm.cs"));
+
+    Assert(form.Contains("FormClosing += HandleFormClosingAsync", StringComparison.Ordinal),
+        "the main form must own an explicit bridge shutdown close path");
+    Assert(form.Contains("await session.ShutdownBridgeAsync();", StringComparison.Ordinal),
+        "closing the app must await bridge shutdown before the form exits");
+    Assert(form.Contains("bridgeShutdownCompleted = true;", StringComparison.Ordinal) &&
+           form.Contains("if (!IsDisposed)", StringComparison.Ordinal) &&
+           form.Contains("Close();", StringComparison.Ordinal),
+        "the close path must resume the original close only after shutdown completion");
+}
+
+static void NativeProcessEventAcceptsResidentDirectBridgeHook()
+{
+    var root = FindRepositoryRoot();
+    var bridge = File.ReadAllText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+
+    Assert(bridge.Contains("address_in_resident_direct_bridge_module", StringComparison.Ordinal) &&
+           bridge.Contains("meccha-direct-bridge-v1-", StringComparison.Ordinal),
+        "the bridge must identify only a resident uniquely staged direct bridge hook");
+    Assert(bridge.Contains("page.State != MEM_COMMIT", StringComparison.Ordinal) &&
+           bridge.Contains("PAGE_EXECUTE_READ", StringComparison.Ordinal),
+        "resident bridge reuse must require an executable committed module page");
+    Assert(bridge.Contains("address_in_main_module(address) || address_in_bridge_module(address) ||", StringComparison.Ordinal) &&
+           bridge.Contains("address_in_resident_direct_bridge_module(address)", StringComparison.Ordinal),
+        "a new bridge must chain through one valid resident direct bridge hook rather than reject it");
+}
+
+static void RuntimeLaunchStagesLocalWindowsCopy()
+{
+    var root = FindRepositoryRoot();
+    var makefile = File.ReadAllText(Path.Combine(root, "Makefile"));
+    var start = File.ReadAllText(Path.Combine(root, "scripts", "start.ps1"));
+
+    Assert(makefile.Contains("START_PS := scripts/start.ps1", StringComparison.Ordinal) &&
+           makefile.Contains("-File \"$$PS_SCRIPT_WIN\" -SourceExe \"$$EXE_WIN\"", StringComparison.Ordinal),
+        "make start must invoke the dedicated staged launcher");
+    Assert(start.Contains("[Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)", StringComparison.Ordinal) &&
+           start.Contains("MecchaCamouflage\\launch", StringComparison.Ordinal) &&
+           start.Contains("Get-FileHash", StringComparison.Ordinal),
+        "the launcher must stage a hash-verified executable under LocalAppData");
+    Assert(start.Contains("Start-Process -FilePath $stagedExe -PassThru", StringComparison.Ordinal) &&
+           !start.Contains("-ArgumentList", StringComparison.Ordinal),
+        "an argument-free launch must not pass a null ArgumentList to PowerShell");
+    Assert(!makefile.Contains("Start-Process", StringComparison.Ordinal),
+        "make start must not directly run the build output that a later build must replace");
 }
 
 static void ReleasePackagingContainsOnlyDirectBridge()

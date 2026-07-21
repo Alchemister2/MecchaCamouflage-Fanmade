@@ -50,6 +50,8 @@ public sealed class MainForm : Form
     private bool rawKeyboardRegistered;
     private bool webViewRetryUsed;
     private bool webViewRecoveryInProgress;
+    private bool bridgeShutdownInProgress;
+    private bool bridgeShutdownCompleted;
 
     public MainForm(HostSession session)
     {
@@ -83,14 +85,7 @@ public sealed class MainForm : Form
                 await HandleWebViewInitializationFailureAsync(ex);
             }
         };
-        FormClosing += (_, _) =>
-        {
-            webReady = false;
-            CancelUiReadyTimeout();
-            PersistWindowSnapshot();
-            UnregisterRawKeyboardInput();
-            hotkeyKeyState.Clear();
-        };
+        FormClosing += HandleFormClosingAsync;
         ResizeEnd += (_, _) => PersistWindowSnapshot();
         Move += (_, _) => PersistWindowSnapshot();
         statusTimer.Tick += async (_, _) =>
@@ -102,6 +97,44 @@ public sealed class MainForm : Form
         };
         session.Log.Changed += (_, _) => PushSnapshotFromAnyThread();
         statusTimer.Start();
+    }
+
+    private async void HandleFormClosingAsync(object? sender, FormClosingEventArgs eventArgs)
+    {
+        if (!bridgeShutdownCompleted)
+        {
+            eventArgs.Cancel = true;
+            if (bridgeShutdownInProgress)
+                return;
+
+            bridgeShutdownInProgress = true;
+            webReady = false;
+            CancelUiReadyTimeout();
+            statusTimer.Stop();
+            try
+            {
+                await session.ShutdownBridgeAsync();
+            }
+            catch (Exception exception)
+            {
+                DiagnosticsState.RecordException("bridge_shutdown_on_form_close", exception);
+            }
+            finally
+            {
+                bridgeShutdownInProgress = false;
+                bridgeShutdownCompleted = true;
+                if (!IsDisposed)
+                    Close();
+            }
+            return;
+        }
+
+        webReady = false;
+        CancelUiReadyTimeout();
+        statusTimer.Stop();
+        PersistWindowSnapshot();
+        UnregisterRawKeyboardInput();
+        hotkeyKeyState.Clear();
     }
 
     protected override void OnHandleCreated(EventArgs e)

@@ -3,6 +3,7 @@ RESEARCH_ARTIFACTS ?= $(MECCHA_RESEARCH_ARTIFACTS)
 VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null || git describe --tags --dirty --always 2>/dev/null || printf dev)
 BUILD_PS := scripts/build.ps1
 RUN_PS := scripts/dev.ps1
+START_PS := scripts/start.ps1
 PACKAGE_PS := scripts/release.ps1
 MESH_PS := scripts/mesh.ps1
 REVIEW_DEAD_CODE_PS := scripts/review/runtime-dead-code-inventory.ps1
@@ -47,12 +48,11 @@ start:
 		exit 1; \
 	fi
 	@if command -v powershell.exe >/dev/null 2>&1; then \
+		PS_SCRIPT_WIN="$$(if command -v wslpath >/dev/null 2>&1; then wslpath -w "$(START_PS)"; else printf '%s' "$(START_PS)"; fi)"; \
 		EXE_WIN="$$(if command -v wslpath >/dev/null 2>&1; then wslpath -w "$(START_EXE)"; else printf '%s' "$(START_EXE)"; fi)"; \
-		EXE_PS="$$(printf '%s' "$$EXE_WIN" | sed "s/'/''/g")"; \
-		powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '$$EXE_PS'"; \
+		powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$$PS_SCRIPT_WIN" -SourceExe "$$EXE_WIN"; \
 	elif command -v pwsh >/dev/null 2>&1; then \
-		EXE_PS="$$(printf '%s' "$(START_EXE)" | sed "s/'/''/g")"; \
-		pwsh -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '$$EXE_PS'"; \
+		pwsh -NoProfile -ExecutionPolicy Bypass -File "$(START_PS)" -SourceExe "$(START_EXE)"; \
 	else \
 		echo "PowerShell runtime not found." >&2; exit 127; \
 	fi
