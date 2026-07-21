@@ -10,6 +10,8 @@ on:
 jobs:
   build:
     runs-on: windows-2022
+    env:
+      BUILD_VERSION: v1.6.2-unofficial.1
 
     steps:
       - name: Checkout
@@ -27,7 +29,7 @@ jobs:
 
       - name: Build runtime
         shell: powershell
-        run: .\scripts\build.ps1
+        run: .\scripts\build.ps1 -Version $env:BUILD_VERSION
 
       - name: Build artifact checks
         shell: powershell
@@ -39,11 +41,18 @@ jobs:
           if (Test-Path "src/native/loader/loader.cpp") { throw "obsolete loader source must not return" }
           if (Test-Path "src/native/include/bridge_loader_abi.hpp") { throw "obsolete loader ABI must not return" }
 
-      - name: Package dry run
+      - name: Package unofficial build
         shell: powershell
         run: |
-          $version = "ci-$env:GITHUB_RUN_NUMBER"
-          .\scripts\release.ps1 -Version $version
-          $exePath = ".build/package/meccha-camouflage-$version.exe"
+          .\scripts\release.ps1 -Version $env:BUILD_VERSION
+          $exePath = ".build/package/meccha-camouflage-$env:BUILD_VERSION.exe"
           if (-not (Test-Path $exePath)) { throw "package exe missing" }
           if ((Get-Item $exePath).Length -le 10000000) { throw "package exe is unexpectedly small" }
+
+      - name: Upload unofficial build
+        uses: actions/upload-artifact@v4
+        with:
+          name: meccha-camouflage-v1.6.2-unofficial.1
+          path: .build/package/meccha-camouflage-v1.6.2-unofficial.1.exe
+          if-no-files-found: error
+          retention-days: 7
